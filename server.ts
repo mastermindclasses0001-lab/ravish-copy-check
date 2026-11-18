@@ -56,6 +56,40 @@ interface EmailJobPayload {
   sent: boolean;
   sentAt?: string;
   lastError?: string;
+  retryCount?: number;
+  nextRetryAt?: number;
+}
+
+let isProcessingEmailQueue = false;
+
+function isRetryableGeminiError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toUpperCase();
+  if (
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('API KEY NOT VALID') ||
+    msg.includes('PERMISSION_DENIED') ||
+    msg.includes('NOT_FOUND') ||
+    msg.includes('INVALID_ARGUMENT') ||
+    msg.includes('400') ||
+    msg.includes('401') ||
+    msg.includes('403') ||
+    msg.includes('404')
+  ) {
+    return false;
+  }
+  return (
+    msg.includes('429') ||
+    msg.includes('500') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('DEADLINE_EXCEEDED') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('FETCH FAILED')
+  );
 }
 
 function getEncryptionKey(): Buffer {
@@ -675,32 +709,53 @@ function upsertEmailQueueJob(job: EmailJobPayload): void {
 }
 
 async function processExpiredEmailQueue(): Promise<void> {
-  const queue = loadEmailQueue();
-  let changed = false;
-  const now = Date.now();
-  for (const job of queue) {
-    if (job.sent) continue;
-    const expiryMs = new Date(job.expiryTime).getTime();
-    if (Number.isFinite(expiryMs) && now >= expiryMs) {
+  if (isProcessingEmailQueue) return;
+  isProcessingEmailQueue = true;
+  try {
+    const queue = loadEmailQueue();
+    const now = Date.now();
+    const dueJobs = queue.filter((job) => {
+      if (job.sent) return false;
+      if (job.nextRetryAt && now < job.nextRetryAt) return false;
+      const expiryMs = new Date(job.expiryTime).getTime();
+      return Number.isFinite(expiryMs) && now >= expiryMs;
+    });
+    if (dueJobs.length === 0) return;
+
+    const smtpCheck = await verifySmtpLive(false);
+    if (!smtpCheck.configured || !smtpCheck.verified) return;
+
+    let changed = false;
+    for (const job of dueJobs) {
       try {
         const result = await sendReportCardEmail(job);
         if (result.sent) {
           job.sent = true;
           job.sentAt = new Date().toISOString();
           job.lastError = undefined;
+          job.retryCount = undefined;
+          job.nextRetryAt = undefined;
           changed = true;
         } else {
+          const tries = (job.retryCount || 0) + 1;
+          job.retryCount = tries;
+          job.nextRetryAt = Date.now() + Math.min(30 * 60_000, tries * 2 * 60_000);
           job.lastError = result.error;
           changed = true;
         }
       } catch (err) {
+        const tries = (job.retryCount || 0) + 1;
+        job.retryCount = tries;
+        job.nextRetryAt = Date.now() + Math.min(30 * 60_000, tries * 2 * 60_000);
         job.lastError = err instanceof Error ? err.message : String(err);
         changed = true;
       }
     }
-  }
-  if (changed) {
-    saveEmailQueue(queue);
+    if (changed) {
+      saveEmailQueue(queue);
+    }
+  } finally {
+    isProcessingEmailQueue = false;
   }
 }
 
@@ -824,22 +879,21 @@ async function startServer() {
         })
         .join('\n\n---\n\n');
 
-      const promptText = `You are an expert, fair, and strict academic examiner for Safal Academy Live.
-Evaluate the student's handwritten answer copy shown across the ${body.pages.length} attached page image(s) for:
-Test: ${body.testTitle} (${body.subject}, ${body.targetClass})
-Student: ${body.studentName}
+      const promptText = `You are a fast, fair academic examiner for Safal Academy Live.
+Evaluate the student's handwritten answer copy (${body.pages.length} page image(s)) for:
+Test: ${body.testTitle} (${body.subject}, ${body.targetClass}) | Student: ${body.studentName}
 
-Questions and Official Ideal Answers:
+Questions & Ideal Answers:
 ${rubricLines}
 
-Instructions:
-1. Read every handwritten page carefully (including English, Hindi/Devanagari, mathematics steps, diagrams, or formulas).
-2. Match each student answer to its corresponding Question Number (Q1, Q2, ...).
-3. Transcribe/summarize clearly what the student actually wrote for each question in "studentAnswer". If the student did not attempt a question, write "Not attempted by student".
-4. Grade strictly and fairly against the Teacher Ideal Answer and Max Marks. Allow step-marking where partially correct. Never exceed Max Marks for a question.
-5. In "causeOfDeduction", explicitly state why marks were deducted (e.g., missing formula, calculation mistake, incomplete steps, concept gap, neatness/unclear) OR write "No deduction — accurate and complete answer" if full marks are awarded.
-6. In "overallAdvice", give constructive, specific study advice (3-5 sentences) helping the student improve weak areas and handwriting/presentation.
-7. Return JSON matching the exact schema.`;
+Rules (be concise and accurate so evaluation is fast):
+1. Read handwriting carefully (English, Hindi/Devanagari, math steps, formulas).
+2. Match each answer to Q1, Q2, etc.
+3. For "studentAnswer": give a concise faithful summary/key steps & final answer (1-3 short lines; write "Not attempted by student" if missing).
+4. Grade fairly with step-marking against Max Marks; never exceed Max Marks.
+5. For "causeOfDeduction": 1 crisp sentence explaining deduction, or "No deduction — accurate and complete answer" if full marks.
+6. For "overallAdvice": 2-3 concise, practical study sentences.
+7. Return JSON matching schema.`;
 
       let lastErr: unknown = null;
       let parsed: {
@@ -890,9 +944,10 @@ Instructions:
           break;
         } catch (err) {
           lastErr = err;
-          if (attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+          if (!isRetryableGeminiError(err) || attempt >= 2) {
+            break;
           }
+          await new Promise((resolve) => setTimeout(resolve, 500 * Math.pow(2, attempt)));
         }
       }
 
@@ -1086,9 +1141,10 @@ Instructions:
           break;
         } catch (err) {
           lastErr = err;
-          if (attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+          if (!isRetryableGeminiError(err) || attempt >= 2) {
+            break;
           }
+          await new Promise((resolve) => setTimeout(resolve, 500 * Math.pow(2, attempt)));
         }
       }
 

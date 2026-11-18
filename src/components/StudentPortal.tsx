@@ -41,6 +41,10 @@ import {
   downloadQuestionPaperPdf,
   downloadStudentReportCardPdf,
 } from '../utils/pdfGenerator';
+import {
+  captureVideoFrameAsDataUrl,
+  compressImageFile,
+} from '../utils/imageCompress';
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { ReportCardModal } from './ReportCardModal';
 
@@ -51,50 +55,6 @@ interface StudentPortalProps {
 interface LocalExamProgress {
   acceptedAt?: string;
   downloadedAt?: string;
-}
-
-function compressDataUrl(sourceDataUrl: string, maxDim = 1150, quality = 0.72): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      let { width, height } = img;
-      if (width > maxDim || height > maxDim) {
-        if (width >= height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
-        } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
-        }
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        reject(new Error('Canvas unavailable'));
-        return;
-      }
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, width, height);
-      ctx.drawImage(img, 0, 0, width, height);
-      let out = canvas.toDataURL('image/jpeg', quality);
-      if (out.length > 360000) out = canvas.toDataURL('image/jpeg', 0.64);
-      if (out.length > 360000) out = canvas.toDataURL('image/jpeg', 0.5);
-      resolve(out);
-    };
-    img.onerror = () => reject(new Error('Failed to process image'));
-    img.src = sourceDataUrl;
-  });
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error('Unable to read image file'));
-    reader.readAsDataURL(file);
-  });
 }
 
 export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
@@ -129,8 +89,10 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState('');
   const [capturedPages, setCapturedPages] = useState<string[]>([]);
+  const [processingPhotos, setProcessingPhotos] = useState(false);
   const [submittingCopy, setSubmittingCopy] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
+  const [submitElapsedSecs, setSubmitElapsedSecs] = useState(0);
   const [submitError, setSubmitError] = useState('');
   const [lastSubmitted, setLastSubmitted] = useState<SubmissionReport | null>(null);
 
@@ -309,8 +271,23 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     if (examStep !== 'camera') {
       stopCamera();
     }
+    if (examStep === 'workspace' || examStep === 'camera') {
+      // Pre-warm backend server (e.g. Render free tier) before student taps Submit
+      void fetch('/api/health').catch(() => {});
+    }
     return () => stopCamera();
   }, [examStep]);
+
+  useEffect(() => {
+    if (!submittingCopy) {
+      setSubmitElapsedSecs(0);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setSubmitElapsedSecs((prev) => prev + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [submittingCopy]);
 
   const startRearCamera = async () => {
     setCameraError('');
@@ -344,17 +321,16 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     }
   };
 
-  const captureFromVideo = async () => {
+  const captureFromVideo = () => {
     if (!videoRef.current || capturedPages.length >= 20) return;
-    const video = videoRef.current;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 960;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const compressed = await compressDataUrl(canvas.toDataURL('image/jpeg', 0.85), 1150, 0.72);
-    setCapturedPages((prev) => [...prev.slice(0, 19), compressed]);
+    const compressed = captureVideoFrameAsDataUrl(videoRef.current, {
+      maxDim: 1024,
+      quality: 0.68,
+      maxChars: 220_000,
+    });
+    if (compressed) {
+      setCapturedPages((prev) => [...prev.slice(0, 19), compressed]);
+    }
   };
 
   const handleFileInputCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -363,20 +339,26 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     const remaining = 20 - capturedPages.length;
     const selected = files.slice(0, remaining);
 
-    const processed: string[] = [];
-    for (const file of selected) {
-      try {
-        const rawUrl = await readFileAsDataUrl(file);
-        const compressed = await compressDataUrl(rawUrl, 1150, 0.72);
-        processed.push(compressed);
-      } catch {
-        // skip unreadable file
+    setProcessingPhotos(true);
+    setSubmitError('');
+    try {
+      const processed = await Promise.all(
+        selected.map((file) =>
+          compressImageFile(file, {
+            maxDim: 1024,
+            quality: 0.68,
+            maxChars: 220_000,
+          }).catch(() => null)
+        )
+      );
+      const valid = processed.filter((item): item is string => Boolean(item));
+      if (valid.length > 0) {
+        setCapturedPages((prev) => [...prev, ...valid].slice(0, 20));
       }
+    } finally {
+      setProcessingPhotos(false);
+      e.target.value = '';
     }
-    if (processed.length > 0) {
-      setCapturedPages((prev) => [...prev, ...processed].slice(0, 20));
-    }
-    e.target.value = '';
   };
 
   const validateAndSaveProfile = async (e: React.FormEvent) => {
@@ -520,34 +502,48 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     }
 
     setSubmittingCopy(true);
-    setSubmitStage('Uploading & Checking Copy with AI...');
+    setSubmitStage('Checking Answer Copy with AI...');
     setSubmitError('');
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 90_000);
 
     try {
       const submissionId = `sub_${selectedTest.testId}_${user.uid}`.replace(/[^a-zA-Z0-9_-]/g, '_');
       const nowIso = new Date().toISOString();
       const prog = progressMap[selectedTest.testId] || {};
 
-      const gradeResp = await fetch('/api/grade-submission', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          submissionId,
-          testId: selectedTest.testId,
-          testTitle: selectedTest.title,
-          subject: selectedTest.subject,
-          targetClass: selectedTest.targetClass,
-          expiryTime: selectedTest.expiryTime,
-          studentName: profile.name,
-          studentSchool: profile.school,
-          studentEmail: profile.email,
-          studentMobile: profile.studentMobile,
-          guardianMobile: profile.guardianMobile,
-          questions: selectedTest.questions,
-          encryptedAnswerKey: selectedTest.encryptedAnswerKey,
-          pages: capturedPages,
-        }),
-      });
+      let gradeResp: Response;
+      try {
+        gradeResp = await fetch('/api/grade-submission', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            submissionId,
+            testId: selectedTest.testId,
+            testTitle: selectedTest.title,
+            subject: selectedTest.subject,
+            targetClass: selectedTest.targetClass,
+            expiryTime: selectedTest.expiryTime,
+            studentName: profile.name,
+            studentSchool: profile.school,
+            studentEmail: profile.email,
+            studentMobile: profile.studentMobile,
+            guardianMobile: profile.guardianMobile,
+            questions: selectedTest.questions,
+            encryptedAnswerKey: selectedTest.encryptedAnswerKey,
+            pages: capturedPages,
+          }),
+        });
+      } catch (fetchErr) {
+        if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
+          throw new Error('Server took too long to respond (90s). Please tap Final Submit again.');
+        }
+        throw fetchErr;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
 
       const gradeData = (await gradeResp.json()) as {
         obtainedMarks?: number;
@@ -564,7 +560,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         throw new Error(gradeData.error || 'AI evaluation failed. Please retry.');
       }
 
-      setSubmitStage('Saving Report Card & Answer Pages...');
+      setSubmitStage('Saving Result & Copy...');
 
       const submissionDoc: SubmissionReport = {
         submissionId,
@@ -1071,14 +1067,22 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
               )}
 
               <label className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-800 hover:bg-slate-100 cursor-pointer min-h-[48px]">
-                <ImagePlus className="w-4 h-4 text-blue-900" />
-                <span>Capture via Phone Camera / Add Photos</span>
+                {processingPhotos ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-blue-900" />
+                ) : (
+                  <ImagePlus className="w-4 h-4 text-blue-900" />
+                )}
+                <span>
+                  {processingPhotos
+                    ? 'Optimizing Photo(s)...'
+                    : 'Capture via Phone Camera / Add Photos'}
+                </span>
                 <input
                   type="file"
                   accept="image/*"
                   capture="environment"
                   multiple
-                  disabled={capturedPages.length >= 20}
+                  disabled={processingPhotos || capturedPages.length >= 20}
                   onChange={handleFileInputCapture}
                   className="hidden"
                 />
@@ -1129,14 +1133,14 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
 
             <button
               type="button"
-              disabled={submittingCopy || capturedPages.length === 0}
+              disabled={submittingCopy || processingPhotos || capturedPages.length === 0}
               onClick={handleSubmitAnswerCopy}
               className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 py-3.5 px-6 text-sm font-bold text-white hover:bg-emerald-800 transition-colors cursor-pointer disabled:opacity-50 min-h-[52px]"
             >
               {submittingCopy ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  {submitStage || `Evaluating & Submitting Copy (${capturedPages.length} Pages)...`}
+                  {submitStage || 'Evaluating & Submitting Copy...'} ({submitElapsedSecs}s)
                 </>
               ) : (
                 <>

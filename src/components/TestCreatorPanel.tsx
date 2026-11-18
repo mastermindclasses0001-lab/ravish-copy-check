@@ -19,6 +19,10 @@ import {
   toLocalDateTimeInputValue,
 } from '../utils/indianMobile';
 import { downloadQuestionPaperPdf } from '../utils/pdfGenerator';
+import {
+  captureVideoFrameAsDataUrl,
+  compressImageFile,
+} from '../utils/imageCompress';
 
 interface TestCreatorPanelProps {
   creatorUid: string;
@@ -65,47 +69,6 @@ function splitNumberedBlocks(raw: string, expectedCount: number): string[] {
   return Array.from({ length: expectedCount }, (_, idx) => blocks[idx] || '');
 }
 
-function compressBookImage(sourceDataUrl: string, maxDim = 1600, quality = 0.85): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      let { width, height } = img;
-      if (width > maxDim || height > maxDim) {
-        if (width >= height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
-        } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
-        }
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        reject(new Error('Canvas unavailable'));
-        return;
-      }
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, width, height);
-      ctx.drawImage(img, 0, 0, width, height);
-      resolve(canvas.toDataURL('image/jpeg', quality));
-    };
-    img.onerror = () => reject(new Error('Failed to load image'));
-    img.src = sourceDataUrl;
-  });
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error('Unable to read image file'));
-    reader.readAsDataURL(file);
-  });
-}
-
 function sanitizeExtractedLineStarts(text: string): string {
   // Prevent accidental splitting when an answer has internal numbered points
   return (text || '')
@@ -138,6 +101,7 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
   // Book Exercise Camera Scanner (up to 5 photos)
   const [scannerOpen, setScannerOpen] = useState(false);
   const [bookPhotos, setBookPhotos] = useState<string[]>([]);
+  const [processingBookPhotos, setProcessingBookPhotos] = useState(false);
   const [aiInstruction, setAiInstruction] = useState('');
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState('');
@@ -202,17 +166,16 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
     }
   };
 
-  const captureBookPhoto = async () => {
+  const captureBookPhoto = () => {
     if (!videoRef.current || bookPhotos.length >= 5) return;
-    const video = videoRef.current;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 960;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const compressed = await compressBookImage(canvas.toDataURL('image/jpeg', 0.9), 1600, 0.85);
-    setBookPhotos((prev) => [...prev, compressed].slice(0, 5));
+    const compressed = captureVideoFrameAsDataUrl(videoRef.current, {
+      maxDim: 1350,
+      quality: 0.78,
+      maxChars: 320_000,
+    });
+    if (compressed) {
+      setBookPhotos((prev) => [...prev, compressed].slice(0, 5));
+    }
   };
 
   const handleBookFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -220,20 +183,25 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
     if (files.length === 0) return;
     const remaining = 5 - bookPhotos.length;
     const picked = files.slice(0, remaining);
-    const processed: string[] = [];
-    for (const f of picked) {
-      try {
-        const rawUrl = await readFileAsDataUrl(f);
-        const compressed = await compressBookImage(rawUrl, 1600, 0.85);
-        processed.push(compressed);
-      } catch {
-        // skip unreadable file
+    setProcessingBookPhotos(true);
+    try {
+      const processed = await Promise.all(
+        picked.map((f) =>
+          compressImageFile(f, {
+            maxDim: 1350,
+            quality: 0.78,
+            maxChars: 320_000,
+          }).catch(() => null)
+        )
+      );
+      const valid = processed.filter((item): item is string => Boolean(item));
+      if (valid.length > 0) {
+        setBookPhotos((prev) => [...prev, ...valid].slice(0, 5));
       }
+    } finally {
+      setProcessingBookPhotos(false);
+      e.target.value = '';
     }
-    if (processed.length > 0) {
-      setBookPhotos((prev) => [...prev, ...processed].slice(0, 5));
-    }
-    e.target.value = '';
   };
 
   const handleExtractFromBook = async () => {
@@ -710,14 +678,22 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
                 )}
 
                 <label className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer min-h-[46px]">
-                  <ImagePlus className="w-4 h-4 text-blue-900" />
-                  <span>Phone Camera / Gallery Upload (Max 5)</span>
+                  {processingBookPhotos ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-blue-900" />
+                  ) : (
+                    <ImagePlus className="w-4 h-4 text-blue-900" />
+                  )}
+                  <span>
+                    {processingBookPhotos
+                      ? 'Optimizing Photo(s)...'
+                      : 'Phone Camera / Gallery Upload (Max 5)'}
+                  </span>
                   <input
                     type="file"
                     accept="image/*"
                     capture="environment"
                     multiple
-                    disabled={bookPhotos.length >= 5}
+                    disabled={processingBookPhotos || bookPhotos.length >= 5}
                     onChange={handleBookFileUpload}
                     className="hidden"
                   />
