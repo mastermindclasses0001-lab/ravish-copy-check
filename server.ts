@@ -204,6 +204,16 @@ function formatSmtpError(err: unknown, cfg: SanitizedSmtpConfig): string {
   return raw;
 }
 
+function formatAppsScriptError(raw: string): string {
+  if (/script\.send_mail|MailApp\.sendEmail|You do not have permission to call MailApp/i.test(raw)) {
+    return 'Apps Script ko Email (MailApp) permission nahi mili hai. Apps Script Editor me ek dummy function Run karke "Review Permissions -> Allow" karen, phir Deploy -> Manage deployments -> Edit -> Version: New version -> Deploy dabayen.';
+  }
+  if (/accounts\.google\.com|<!DOCTYPE/i.test(raw)) {
+    return 'Google Apps Script URL me "Who has access: Anyone" set nahi hai. Script dubara Deploy -> Anyone karke naya /exec URL dalen.';
+  }
+  return raw;
+}
+
 let smtpVerifyCache: {
   key: string;
   verified: boolean;
@@ -251,7 +261,7 @@ async function verifySmtpLive(forceRefresh = false): Promise<{
       const resp = await fetch(cfg.gmailScriptUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'ping' }),
+        body: JSON.stringify({ action: 'ping', checkMailQuota: true }),
         redirect: 'follow',
         signal: AbortSignal.timeout(12_000),
       });
@@ -263,9 +273,8 @@ async function verifySmtpLive(forceRefresh = false): Promise<{
         parsed = null;
       }
       if (!resp.ok || !parsed?.ok) {
-        const msg = text.includes('accounts.google.com') || text.includes('<!DOCTYPE')
-          ? 'Google Apps Script URL me "Who has access: Anyone" set nahi hai. Script dubara Deploy → Anyone karke naya /exec URL dalen.'
-          : parsed?.error || `Apps Script error (HTTP ${resp.status}).`;
+        const rawErr = parsed?.error || (text.includes('<!DOCTYPE') ? text : `Apps Script error (HTTP ${resp.status}).`);
+        const msg = formatAppsScriptError(rawErr);
         smtpVerifyCache = { key: cacheKey, verified: false, error: msg, userMasked: defaultMasked, checkedAt: Date.now() };
         return {
           configured: true,
@@ -574,10 +583,23 @@ async function sendReportCardEmail(job: EmailJobPayload): Promise<{ sent: boolea
       if (resp.ok && parsed?.ok) {
         return { sent: true, status: 'sent' };
       }
+      const rawErr = parsed?.error || `Apps Script send failed (HTTP ${resp.status}).`;
+      const friendlyErr = formatAppsScriptError(rawErr);
+      if (/script\.send_mail|MailApp|permission|Anyone/i.test(rawErr)) {
+        const secretSeed = cfg.gmailScriptUrl;
+        const cacheKey = `${cfg.transportMode}:${crypto.createHash('sha256').update(secretSeed).digest('hex').slice(0, 12)}`;
+        smtpVerifyCache = {
+          key: cacheKey,
+          verified: false,
+          error: friendlyErr,
+          userMasked: maskSmtpUser(cfg.user) || 'Gmail Apps Script (HTTPS)',
+          checkedAt: Date.now(),
+        };
+      }
       return {
         sent: false,
         status: 'failed',
-        error: parsed?.error || `Apps Script send failed (HTTP ${resp.status}).`,
+        error: friendlyErr,
       };
     } catch (err) {
       return {

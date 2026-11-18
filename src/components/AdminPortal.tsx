@@ -11,6 +11,8 @@ import {
 } from 'firebase/firestore';
 import {
   Award,
+  Clock,
+  Edit3,
   FileDown,
   FileText,
   Loader2,
@@ -46,6 +48,7 @@ import {
   downloadQuestionPaperPdf,
 } from '../utils/pdfGenerator';
 import { ConfirmModal } from './ConfirmModal';
+import { EditTestModal } from './EditTestModal';
 import { ReportCardModal } from './ReportCardModal';
 import { TestCreatorPanel } from './TestCreatorPanel';
 
@@ -61,7 +64,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
   const [loginError, setLoginError] = useState('');
   const [verifying, setVerifying] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<'results' | 'create' | 'teachers' | 'students'>('results');
+  const [activeTab, setActiveTab] = useState<'results' | 'create' | 'manage_tests' | 'teachers' | 'students'>('results');
 
   // Data collections
   const [tests, setTests] = useState<ExamTest[]>([]);
@@ -101,8 +104,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
   } | null>(null);
   const [teacherFormError, setTeacherFormError] = useState('');
 
-  // Modals
+  // Modals & test edit helpers
   const [viewingReport, setViewingReport] = useState<SubmissionReport | null>(null);
+  const [editingTest, setEditingTest] = useState<ExamTest | null>(null);
+  const [extendingTestId, setExtendingTestId] = useState<string>('');
   const [confirmAction, setConfirmAction] = useState<{
     title: string;
     message: string;
@@ -406,6 +411,25 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           ? `${sentCount} expired Report Card email(s) sent successfully!`
           : lastErr || 'Could not send emails — check SMTP configuration.'
       );
+      if (sentCount === 0 && lastErr) {
+        try {
+          const esResp = await fetch('/api/email-status');
+          if (esResp.ok) {
+            setEmailStatusInfo(
+              (await esResp.json()) as {
+                smtpConfigured: boolean;
+                smtpVerified?: boolean;
+                smtpError?: string;
+                smtpUserMasked?: string;
+                passLooksLikeAppPassword?: boolean;
+                pendingQueueCount: number;
+              }
+            );
+          }
+        } catch {
+          // ignore refresh failure
+        }
+      }
     } finally {
       setDispatchingBatch(false);
     }
@@ -418,6 +442,57 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       await downloadClassRankingPdf(activeSelectedTest, rankedSubmissions);
     } finally {
       setDownloadingRanking(false);
+    }
+  };
+
+  const handleTestUpdated = async (updated: ExamTest) => {
+    setTests((prev) => prev.map((t) => (t.testId === updated.testId ? updated : t)));
+
+    // Sync updated expiryTime to unsent submissions for this test so result scheduling matches
+    const matchingSubs = submissions.filter(
+      (s) => s.testId === updated.testId && s.emailStatus !== 'sent' && s.expiryTime !== updated.expiryTime
+    );
+    if (matchingSubs.length > 0) {
+      await Promise.all(
+        matchingSubs.map((sub) =>
+          updateDoc(doc(db, 'submissions', sub.submissionId), {
+            expiryTime: updated.expiryTime,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {})
+        )
+      );
+      setSubmissions((prev) =>
+        prev.map((s) =>
+          s.testId === updated.testId && s.emailStatus !== 'sent'
+            ? { ...s, expiryTime: updated.expiryTime }
+            : s
+        )
+      );
+    }
+  };
+
+  const handleQuickExtendOneHour = async (test: ExamTest) => {
+    setExtendingTestId(test.testId);
+    try {
+      const currentExpMs = new Date(test.expiryTime).getTime();
+      const baseMs = Number.isFinite(currentExpMs)
+        ? Math.max(currentExpMs, Date.now())
+        : Date.now();
+      const nextExpiryIso = new Date(baseMs + 60 * 60_000).toISOString();
+
+      try {
+        await updateDoc(doc(db, 'tests', test.testId), {
+          expiryTime: nextExpiryIso,
+          active: true,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `tests/${test.testId}`);
+      }
+
+      await handleTestUpdated({ ...test, expiryTime: nextExpiryIso, active: true });
+    } finally {
+      setExtendingTestId('');
     }
   };
 
@@ -534,6 +609,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           }`}
         >
           Create Test (Teacher Tools)
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('manage_tests')}
+          className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap min-h-[40px] ${
+            activeTab === 'manage_tests' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Manage &amp; Edit Tests ({tests.length})
         </button>
         <button
           type="button"
@@ -659,11 +743,20 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                   {filteredTests.length === 0 ? (
                     <option value="">No tests found</option>
                   ) : (
-                    filteredTests.map((t) => (
-                      <option key={t.testId} value={t.testId}>
-                        {t.title} ({t.targetClass} · {t.subject})
-                      </option>
-                    ))
+                    filteredTests.map((t) => {
+                      const expMs = new Date(t.expiryTime).getTime();
+                      const tag = !t.active
+                        ? '[Paused] '
+                        : Number.isFinite(expMs) && Date.now() > expMs
+                        ? '[Expired] '
+                        : '';
+                      return (
+                        <option key={t.testId} value={t.testId}>
+                          {tag}
+                          {t.title} ({t.targetClass} · {t.subject})
+                        </option>
+                      );
+                    })
                   )}
                 </select>
               </div>
@@ -709,26 +802,36 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                     {formatDateTimeReadable(activeSelectedTest.expiryTime)}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setConfirmAction({
-                      title: 'Delete Test?',
-                      message: `Delete "${activeSelectedTest.title}" permanently?`,
-                      confirmLabel: 'Delete Test',
-                      run: async () => {
-                        await deleteDoc(doc(db, 'tests', activeSelectedTest.testId));
-                        setTests((prev) =>
-                          prev.filter((t) => t.testId !== activeSelectedTest.testId)
-                        );
-                      },
-                    })
-                  }
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-700 hover:underline cursor-pointer"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Delete This Test
-                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEditingTest(activeSelectedTest)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-900 hover:bg-blue-100 cursor-pointer"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    Edit Test / Extend Timing
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setConfirmAction({
+                        title: 'Delete Test?',
+                        message: `Delete "${activeSelectedTest.title}" permanently?`,
+                        confirmLabel: 'Delete Test',
+                        run: async () => {
+                          await deleteDoc(doc(db, 'tests', activeSelectedTest.testId));
+                          setTests((prev) =>
+                            prev.filter((t) => t.testId !== activeSelectedTest.testId)
+                          );
+                        },
+                      })
+                    }
+                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-700 hover:underline cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete This Test
+                  </button>
+                </div>
               </div>
 
               {rankedSubmissions.length === 0 ? (
@@ -800,6 +903,135 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           creatorRole="admin"
           onTestCreated={(t) => setTests((prev) => [t, ...prev])}
         />
+      )}
+
+      {/* TAB 2B: Manage & Edit Tests (Extend Timing, Windows, Status, Questions) */}
+      {activeTab === 'manage_tests' && (
+        <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                Manage Tests &amp; Extend Timing ({tests.length})
+              </h3>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Quickly extend expiry time, adjust download/submit windows, pause/activate, or edit questions.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('create')}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-blue-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-800 cursor-pointer self-start sm:self-auto"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              New Test
+            </button>
+          </div>
+
+          {tests.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-600">
+              No tests created yet.
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {tests.map((t) => {
+                const nowMs = Date.now();
+                const startMs = new Date(t.startTime).getTime();
+                const expMs = new Date(t.expiryTime).getTime();
+                const statusLabel = !t.active
+                  ? 'Paused'
+                  : Number.isFinite(expMs) && nowMs > expMs
+                  ? 'Expired'
+                  : Number.isFinite(startMs) && nowMs < startMs
+                  ? 'Upcoming'
+                  : 'Live Now';
+                const statusClass =
+                  statusLabel === 'Live Now'
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                    : statusLabel === 'Expired'
+                    ? 'bg-red-50 text-red-800 border-red-200'
+                    : statusLabel === 'Paused'
+                    ? 'bg-slate-100 text-slate-700 border-slate-300'
+                    : 'bg-amber-50 text-amber-800 border-amber-200';
+
+                return (
+                  <div
+                    key={t.testId}
+                    className="p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 hover:bg-slate-50/70"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-slate-900 text-sm sm:text-base">
+                          {t.title}
+                        </span>
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-bold ${statusClass}`}
+                        >
+                          {statusLabel}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-600">
+                        {t.targetClass} · {t.subject} · {t.totalQuestions} Questions ({t.totalMarks} Marks)
+                      </div>
+                      <div className="text-xs text-slate-700 flex flex-wrap gap-x-4 gap-y-1 pt-0.5">
+                        <span>
+                          <strong>Start:</strong> {formatDateTimeReadable(t.startTime)}
+                        </span>
+                        <span>
+                          <strong>Expiry:</strong> {formatDateTimeReadable(t.expiryTime)}
+                        </span>
+                        <span>
+                          <strong>Windows:</strong> DL {t.downloadDurationMins}m / Submit {t.submitDurationMins}m
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={extendingTestId === t.testId}
+                        onClick={() => void handleQuickExtendOneHour(t)}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 cursor-pointer disabled:opacity-60 min-h-[40px]"
+                      >
+                        {extendingTestId === t.testId ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Clock className="w-3.5 h-3.5" />
+                        )}
+                        +1 Hr Extend
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingTest(t)}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-blue-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-800 cursor-pointer min-h-[40px]"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        Edit Test / Timing
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setConfirmAction({
+                            title: 'Delete Test?',
+                            message: `Delete "${t.title}" permanently?`,
+                            confirmLabel: 'Delete Test',
+                            run: async () => {
+                              await deleteDoc(doc(db, 'tests', t.testId));
+                              setTests((prev) => prev.filter((item) => item.testId !== t.testId));
+                            },
+                          })
+                        }
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 cursor-pointer min-h-[40px]"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {/* TAB 3: Add & Remove Teachers */}
@@ -1036,6 +1268,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
             )
           )
         }
+      />
+
+      <EditTestModal
+        test={editingTest}
+        onClose={() => setEditingTest(null)}
+        onTestUpdated={(updated) => void handleTestUpdated(updated)}
       />
 
       <ConfirmModal
