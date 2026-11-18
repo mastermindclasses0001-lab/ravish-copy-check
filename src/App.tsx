@@ -17,10 +17,30 @@ import { TeacherPortal } from './components/TeacherPortal';
 import { auth, signOutUser } from './firebase';
 import type { RolePortal } from './types';
 
+const PORTAL_SESSION_KEY = 'safal_active_portal_v1';
+
 export default function App() {
-  const [portal, setPortal] = useState<RolePortal>('home');
+  const [portal, setPortal] = useState<RolePortal>(() => {
+    try {
+      const saved = sessionStorage.getItem(PORTAL_SESSION_KEY);
+      if (saved === 'home' || saved === 'student' || saved === 'teacher' || saved === 'admin') {
+        return saved;
+      }
+    } catch {
+      // ignore
+    }
+    return 'home';
+  });
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(PORTAL_SESSION_KEY, portal);
+    } catch {
+      // ignore
+    }
+  }, [portal]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -34,6 +54,7 @@ export default function App() {
     await signOutUser();
     try {
       sessionStorage.removeItem('safal_admin_verified_v1');
+      sessionStorage.removeItem(PORTAL_SESSION_KEY);
     } catch {
       // ignore
     }

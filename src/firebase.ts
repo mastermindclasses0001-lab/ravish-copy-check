@@ -1,8 +1,10 @@
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -79,10 +81,21 @@ async function testConnection() {
 }
 
 void testConnection();
+void getRedirectResult(auth).catch(() => {});
 
 export async function signInWithGoogle(): Promise<User> {
-  const result = await signInWithPopup(auth, googleProvider);
-  return result.user;
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    return result.user;
+  } catch (err) {
+    const code = (err as { code?: string })?.code || '';
+    const isTopWindow = typeof window !== 'undefined' && window.self === window.top;
+    if (code === 'auth/popup-blocked' && isTopWindow) {
+      await signInWithRedirect(auth, googleProvider);
+      throw new Error('Redirecting to Google Sign-In...');
+    }
+    throw err;
+  }
 }
 
 export async function signOutUser(): Promise<void> {

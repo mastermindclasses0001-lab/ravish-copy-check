@@ -182,22 +182,28 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
+    const trimmedPass = passwordInput.trim();
+    if (!trimmedPass) {
+      setLoginError('Please enter your Admin passcode.');
+      return;
+    }
+
     setVerifying(true);
     try {
+      let activeUser = user;
+      if (!activeUser) {
+        activeUser = await signInWithGoogle();
+      }
+
       const resp = await fetch('/api/auth/admin-verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: passwordInput.trim() }),
+        body: JSON.stringify({ password: trimmedPass }),
       });
       const data = (await resp.json()) as { verified?: boolean; error?: string };
       if (!resp.ok || !data.verified) {
         setLoginError(data.error || 'Incorrect Admin password.');
         return;
-      }
-
-      let activeUser = user;
-      if (!activeUser) {
-        activeUser = await signInWithGoogle();
       }
 
       sessionStorage.setItem(ADMIN_SESSION_KEY, 'true');
