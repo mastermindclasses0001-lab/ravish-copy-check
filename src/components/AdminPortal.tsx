@@ -47,6 +47,7 @@ import {
   downloadClassRankingPdf,
   downloadQuestionPaperPdf,
 } from '../utils/pdfGenerator';
+import { parseJsonResponse } from '../utils/safeFetch';
 import { ConfirmModal } from './ConfirmModal';
 import { EditTestModal } from './EditTestModal';
 import { ReportCardModal } from './ReportCardModal';
@@ -160,14 +161,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
         const esResp = await fetch('/api/email-status');
         if (esResp.ok) {
           setEmailStatusInfo(
-            (await esResp.json()) as {
+            await parseJsonResponse<{
               smtpConfigured: boolean;
               smtpVerified?: boolean;
               smtpError?: string;
               smtpUserMasked?: string;
               passLooksLikeAppPassword?: boolean;
               pendingQueueCount: number;
-            }
+            }>(esResp)
           );
         }
       } catch {
@@ -205,7 +206,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: trimmedPass }),
       });
-      const data = (await resp.json()) as { verified?: boolean; error?: string };
+      const data = await parseJsonResponse<{ verified?: boolean; error?: string }>(resp);
       if (!resp.ok || !data.verified) {
         setLoginError(data.error || 'Incorrect Admin password.');
         return;
@@ -335,14 +336,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
     setEmailActionNotice('');
     try {
       const resp = await fetch('/api/test-smtp', { method: 'POST' });
-      const data = (await resp.json()) as {
+      const data = await parseJsonResponse<{
         ok?: boolean;
         smtpVerified?: boolean;
         smtpUserMasked?: string;
         passLooksLikeAppPassword?: boolean;
         message?: string;
         error?: string;
-      };
+      }>(resp);
       setEmailStatusInfo((prev) =>
         prev
           ? {
@@ -378,12 +379,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(sub),
         });
-        const data = (await resp.json()) as {
+        const data = await parseJsonResponse<{
           sent?: boolean;
           status?: SubmissionReport['emailStatus'];
           sentAt?: string;
           error?: string;
-        };
+        }>(resp);
         const nextStatus: SubmissionReport['emailStatus'] = data.sent
           ? 'sent'
           : data.status || 'pending_smtp';
@@ -416,14 +417,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           const esResp = await fetch('/api/email-status');
           if (esResp.ok) {
             setEmailStatusInfo(
-              (await esResp.json()) as {
+              await parseJsonResponse<{
                 smtpConfigured: boolean;
                 smtpVerified?: boolean;
                 smtpError?: string;
                 smtpUserMasked?: string;
                 passLooksLikeAppPassword?: boolean;
                 pendingQueueCount: number;
-              }
+              }>(esResp)
             );
           }
         } catch {

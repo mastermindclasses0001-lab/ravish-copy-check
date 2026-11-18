@@ -23,6 +23,7 @@ import {
   captureVideoFrameAsDataUrl,
   compressImageFile,
 } from '../utils/imageCompress';
+import { parseJsonResponse } from '../utils/safeFetch';
 
 interface TestCreatorPanelProps {
   creatorUid: string;
@@ -232,10 +233,10 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
         }),
       });
 
-      const data = (await resp.json()) as {
+      const data = await parseJsonResponse<{
         items?: Array<{ sourceLabel?: string; questionText: string; idealAnswer: string }>;
         error?: string;
-      };
+      }>(resp);
 
       if (!resp.ok || !data.items || data.items.length === 0) {
         throw new Error(data.error || 'Could not extract selected questions from the photo(s).');
@@ -332,7 +333,7 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idealAnswers }),
       });
-      const encData = (await encResp.json()) as { encryptedAnswerKey?: string; error?: string };
+      const encData = await parseJsonResponse<{ encryptedAnswerKey?: string; error?: string }>(encResp);
       if (!encResp.ok || !encData.encryptedAnswerKey) {
         throw new Error(encData.error || 'Failed to secure ideal answer key.');
       }

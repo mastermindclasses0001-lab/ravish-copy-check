@@ -784,6 +784,8 @@ async function processExpiredEmailQueue(): Promise<void> {
 async function startServer() {
   const app = express();
   const httpServer = http.createServer(app);
+  httpServer.requestTimeout = 180_000;
+  httpServer.headersTimeout = 65_000;
   app.use(express.json({ limit: '35mb' }));
 
   app.get('/api/health', (_req, res) => {
@@ -848,6 +850,15 @@ async function startServer() {
   });
 
   app.post('/api/grade-submission', async (req, res) => {
+    const wantsStream =
+      req.query.stream === '1' ||
+      String(req.headers.accept || '').includes('text/event-stream');
+
+    const sendSse = (eventObj: Record<string, unknown>) => {
+      if (!wantsStream || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(eventObj)}\n\n`);
+    };
+
     try {
       const body = req.body as {
         submissionId: string;
@@ -877,6 +888,18 @@ async function startServer() {
       if (!body.encryptedAnswerKey) {
         res.status(400).json({ error: 'Encrypted ideal answer key is missing.' });
         return;
+      }
+
+      if (wantsStream) {
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
+        sendSse({
+          type: 'stage',
+          message: `Received ${body.pages.length} page(s) — Gemini 4 Hydrogen reading handwriting...`,
+        });
       }
 
       const idealAnswers = decryptJson<IdealAnswerItem[]>(body.encryptedAnswerKey);
@@ -917,6 +940,31 @@ Rules (be concise and accurate so evaluation is fast):
 6. For "overallAdvice": 2-3 concise, practical study sentences.
 7. Return JSON matching schema.`;
 
+      const schemaConfig = {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            questionReports: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  qNo: { type: Type.INTEGER },
+                  studentAnswer: { type: Type.STRING },
+                  marksObtained: { type: Type.NUMBER },
+                  causeOfDeduction: { type: Type.STRING },
+                },
+                required: ['qNo', 'studentAnswer', 'marksObtained', 'causeOfDeduction'],
+              },
+            },
+            overallAdvice: { type: Type.STRING },
+          },
+          required: ['questionReports', 'overallAdvice'],
+        },
+      };
+
       let lastErr: unknown = null;
       let parsed: {
         questionReports: Array<{
@@ -928,54 +976,76 @@ Rules (be concise and accurate so evaluation is fast):
         overallAdvice: string;
       } | null = null;
 
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const response = await ai.models.generateContent({
-            model: 'gemini-4-hydrogen',
-            contents: {
-              parts: [...imageParts, { text: promptText }],
-            },
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  questionReports: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        qNo: { type: Type.INTEGER },
-                        studentAnswer: { type: Type.STRING },
-                        marksObtained: { type: Type.NUMBER },
-                        causeOfDeduction: { type: Type.STRING },
-                      },
-                      required: ['qNo', 'studentAnswer', 'marksObtained', 'causeOfDeduction'],
-                    },
-                  },
-                  overallAdvice: { type: Type.STRING },
-                },
-                required: ['questionReports', 'overallAdvice'],
-              },
-            },
-          });
+      const heartbeat = wantsStream
+        ? setInterval(() => {
+            if (!res.writableEnded) {
+              res.write(': keep-alive\n\n');
+            }
+          }, 3_000)
+        : null;
 
-          const rawText = (response.text ?? '{}').trim();
-          parsed = JSON.parse(rawText);
-          break;
-        } catch (err) {
-          lastErr = err;
-          if (!isRetryableGeminiError(err) || attempt >= 2) {
+      try {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (wantsStream) {
+              let rawText = '';
+              let lastProgressAt = Date.now();
+              const stream = await ai.models.generateContentStream({
+                model: 'gemini-4-hydrogen',
+                contents: {
+                  parts: [...imageParts, { text: promptText }],
+                },
+                config: schemaConfig,
+              });
+              for await (const chunk of stream) {
+                const piece = chunk.text ?? '';
+                if (piece) {
+                  rawText += piece;
+                  if (Date.now() - lastProgressAt >= 450) {
+                    lastProgressAt = Date.now();
+                    sendSse({
+                      type: 'stage',
+                      message: `Gemini 4 Hydrogen grading ${body.pages.length} page(s)...`,
+                    });
+                  }
+                }
+              }
+              parsed = JSON.parse((rawText || '{}').trim());
+            } else {
+              const response = await ai.models.generateContent({
+                model: 'gemini-4-hydrogen',
+                contents: {
+                  parts: [...imageParts, { text: promptText }],
+                },
+                config: schemaConfig,
+              });
+              const rawText = (response.text ?? '{}').trim();
+              parsed = JSON.parse(rawText);
+            }
             break;
+          } catch (err) {
+            lastErr = err;
+            if (!isRetryableGeminiError(err) || attempt >= 2) {
+              break;
+            }
+            if (wantsStream) {
+              sendSse({ type: 'stage', message: 'Retrying AI evaluation...' });
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500 * Math.pow(2, attempt)));
           }
-          await new Promise((resolve) => setTimeout(resolve, 500 * Math.pow(2, attempt)));
         }
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
       }
 
       if (!parsed) {
         const message = lastErr instanceof Error ? lastErr.message : String(lastErr);
-        res.status(502).json({ error: `AI evaluation failed: ${message}` });
+        if (wantsStream) {
+          sendSse({ type: 'error', error: `AI evaluation failed: ${message}` });
+          res.end();
+        } else {
+          res.status(502).json({ error: `AI evaluation failed: ${message}` });
+        }
         return;
       }
 
@@ -1037,7 +1107,7 @@ Rules (be concise and accurate so evaluation is fast):
         void processExpiredEmailQueue();
       }
 
-      res.json({
+      const resultPayload = {
         obtainedMarks,
         totalMarks,
         percentage,
@@ -1045,10 +1115,23 @@ Rules (be concise and accurate so evaluation is fast):
         overallAdvice,
         emailStatus,
         emailSentAt,
-      });
+      };
+
+      if (wantsStream) {
+        sendSse({ type: 'result', data: resultPayload });
+        res.end();
+      } else {
+        res.json(resultPayload);
+      }
     } catch (err) {
       console.error('Grade submission error:', err);
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Grading failed.' });
+      const msg = err instanceof Error ? err.message : 'Grading failed.';
+      if (wantsStream && res.headersSent) {
+        sendSse({ type: 'error', error: msg });
+        res.end();
+      } else {
+        res.status(500).json({ error: msg });
+      }
     }
   });
 
@@ -1184,6 +1267,10 @@ Instructions:
       console.error('Extract book questions error:', err);
       res.status(500).json({ error: err instanceof Error ? err.message : 'Extraction failed.' });
     }
+  });
+
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
   });
 
   // Periodic post-expiry automated email worker

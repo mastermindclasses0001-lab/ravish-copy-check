@@ -8,6 +8,7 @@ import {
   SUBJECT_OPTIONS,
   toLocalDateTimeInputValue,
 } from '../utils/indianMobile';
+import { parseJsonResponse } from '../utils/safeFetch';
 
 interface EditTestModalProps {
   test: ExamTest | null;
@@ -156,10 +157,10 @@ export const EditTestModal: React.FC<EditTestModalProps> = ({
             })),
           }),
         });
-        const encData = (await encResp.json()) as {
+        const encData = await parseJsonResponse<{
           encryptedAnswerKey?: string;
           error?: string;
-        };
+        }>(encResp);
         if (!encResp.ok || !encData.encryptedAnswerKey) {
           throw new Error(encData.error || 'Failed to encrypt updated ideal answers.');
         }

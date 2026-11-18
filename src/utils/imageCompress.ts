@@ -115,3 +115,34 @@ export async function compressImageFile(
     URL.revokeObjectURL(objectUrl);
   }
 }
+
+export async function compressImageFilesInBatches(
+  files: File[],
+  options: ImageCompressOptions = {},
+  onProgress?: (completed: number, total: number) => void,
+  concurrency = 3
+): Promise<string[]> {
+  const total = files.length;
+  if (total === 0) return [];
+  const results: Array<string | null> = new Array(total).fill(null);
+  let nextIndex = 0;
+  let completed = 0;
+
+  const worker = async () => {
+    while (nextIndex < total) {
+      const idx = nextIndex++;
+      try {
+        results[idx] = await compressImageFile(files[idx], options);
+      } catch {
+        results[idx] = null;
+      } finally {
+        completed++;
+        onProgress?.(completed, total);
+      }
+    }
+  };
+
+  const workerCount = Math.min(concurrency, total);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results.filter((item): item is string => Boolean(item));
+}

@@ -10,6 +10,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   ArrowLeft,
@@ -43,8 +44,9 @@ import {
 } from '../utils/pdfGenerator';
 import {
   captureVideoFrameAsDataUrl,
-  compressImageFile,
+  compressImageFilesInBatches,
 } from '../utils/imageCompress';
+import { parseJsonResponse } from '../utils/safeFetch';
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { ReportCardModal } from './ReportCardModal';
 
@@ -90,6 +92,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
   const [cameraError, setCameraError] = useState('');
   const [capturedPages, setCapturedPages] = useState<string[]>([]);
   const [processingPhotos, setProcessingPhotos] = useState(false);
+  const [photoProgressText, setPhotoProgressText] = useState('');
   const [submittingCopy, setSubmittingCopy] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
   const [submitElapsedSecs, setSubmitElapsedSecs] = useState(0);
@@ -211,7 +214,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
           void (async () => {
             try {
               const stResp = await fetch('/api/email-status');
-              const st = (await stResp.json()) as { smtpConfigured?: boolean; smtpVerified?: boolean };
+              const st = await parseJsonResponse<{ smtpConfigured?: boolean; smtpVerified?: boolean }>(stResp);
               if (!st.smtpConfigured || !st.smtpVerified) return;
               for (const sub of dueSubs) {
                 const resp = await fetch('/api/dispatch-result-email', {
@@ -219,11 +222,11 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(sub),
                 });
-                const resJson = (await resp.json()) as {
+                const resJson = await parseJsonResponse<{
                   sent?: boolean;
                   status?: SubmissionReport['emailStatus'];
                   sentAt?: string;
-                };
+                }>(resp);
                 if (resJson.sent) {
                   await updateDoc(doc(db, 'submissions', sub.submissionId), {
                     emailStatus: 'sent',
@@ -324,9 +327,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
   const captureFromVideo = () => {
     if (!videoRef.current || capturedPages.length >= 20) return;
     const compressed = captureVideoFrameAsDataUrl(videoRef.current, {
-      maxDim: 1024,
-      quality: 0.68,
-      maxChars: 220_000,
+      maxDim: 1000,
+      quality: 0.65,
+      maxChars: 165_000,
     });
     if (compressed) {
       setCapturedPages((prev) => [...prev.slice(0, 19), compressed]);
@@ -340,23 +343,27 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     const selected = files.slice(0, remaining);
 
     setProcessingPhotos(true);
+    setPhotoProgressText(`Optimizing Photos (0/${selected.length})...`);
     setSubmitError('');
     try {
-      const processed = await Promise.all(
-        selected.map((file) =>
-          compressImageFile(file, {
-            maxDim: 1024,
-            quality: 0.68,
-            maxChars: 220_000,
-          }).catch(() => null)
-        )
+      const valid = await compressImageFilesInBatches(
+        selected,
+        {
+          maxDim: 1000,
+          quality: 0.65,
+          maxChars: 165_000,
+        },
+        (done, total) => {
+          setPhotoProgressText(`Optimizing Photos (${done}/${total})...`);
+        },
+        3
       );
-      const valid = processed.filter((item): item is string => Boolean(item));
       if (valid.length > 0) {
         setCapturedPages((prev) => [...prev, ...valid].slice(0, 20));
       }
     } finally {
       setProcessingPhotos(false);
+      setPhotoProgressText('');
       e.target.value = '';
     }
   };
@@ -502,11 +509,11 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     }
 
     setSubmittingCopy(true);
-    setSubmitStage('Checking Answer Copy with AI...');
+    setSubmitStage(`Uploading ${capturedPages.length} page(s) to AI...`);
     setSubmitError('');
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 90_000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 150_000);
 
     try {
       const submissionId = `sub_${selectedTest.testId}_${user.uid}`.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -515,9 +522,12 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
 
       let gradeResp: Response;
       try {
-        gradeResp = await fetch('/api/grade-submission', {
+        gradeResp = await fetch('/api/grade-submission?stream=1', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream, application/json',
+          },
           signal: controller.signal,
           body: JSON.stringify({
             submissionId,
@@ -538,14 +548,12 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         });
       } catch (fetchErr) {
         if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-          throw new Error('Server took too long to respond (90s). Please tap Final Submit again.');
+          throw new Error('Server took too long to respond (150s). Please tap Final Submit again.');
         }
         throw fetchErr;
-      } finally {
-        window.clearTimeout(timeoutId);
       }
 
-      const gradeData = (await gradeResp.json()) as {
+      type GradeResultPayload = {
         obtainedMarks?: number;
         totalMarks?: number;
         percentage?: number;
@@ -556,11 +564,61 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         error?: string;
       };
 
-      if (!gradeResp.ok || !gradeData.questionReports) {
-        throw new Error(gradeData.error || 'AI evaluation failed. Please retry.');
+      let gradeData: GradeResultPayload | null = null;
+      const contentType = gradeResp.headers.get('content-type') || '';
+
+      try {
+        if (contentType.includes('text/event-stream') && gradeResp.body) {
+          const reader = gradeResp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.split('\n\n');
+            buffer = blocks.pop() || '';
+            for (const block of blocks) {
+              const dataLines = block
+                .split('\n')
+                .filter((line) => line.startsWith('data:'))
+                .map((line) => line.slice(5).trim());
+              if (dataLines.length === 0) continue;
+              const rawEvent = dataLines.join('\n');
+              try {
+                const evt = JSON.parse(rawEvent) as {
+                  type?: string;
+                  message?: string;
+                  error?: string;
+                  data?: GradeResultPayload;
+                };
+                if (evt.type === 'stage' && evt.message) {
+                  setSubmitStage(evt.message);
+                } else if (evt.type === 'error') {
+                  throw new Error(evt.error || 'AI evaluation failed. Please retry.');
+                } else if (evt.type === 'result' && evt.data) {
+                  gradeData = evt.data;
+                }
+              } catch (parseErr) {
+                if (parseErr instanceof Error && parseErr.message !== rawEvent && !parseErr.message.includes('JSON')) {
+                  throw parseErr;
+                }
+              }
+            }
+          }
+        } else {
+          gradeData = await parseJsonResponse<GradeResultPayload>(gradeResp);
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
       }
 
-      setSubmitStage('Saving Result & Copy...');
+      if (!gradeResp.ok || !gradeData || !gradeData.questionReports) {
+        throw new Error(gradeData?.error || 'AI evaluation failed. Please retry.');
+      }
+
+      setSubmitStage(`Saving Result & ${capturedPages.length} Page(s)...`);
 
       const submissionDoc: SubmissionReport = {
         submissionId,
@@ -599,25 +657,31 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         handleFirestoreError(err, OperationType.CREATE, `submissions/${submissionId}`);
       }
 
-      // Store all compressed copy pages in parallel (each << 400KB)
-      await Promise.all(
-        capturedPages.map(async (pageDataUrl, i) => {
+      // Commit compressed pages in batches of 5 in parallel (fast & well under 10MB batch cap)
+      const CHUNK_SIZE = 5;
+      const chunkCommits: Array<Promise<void>> = [];
+      for (let start = 0; start < capturedPages.length; start += CHUNK_SIZE) {
+        const batch = writeBatch(db);
+        const end = Math.min(start + CHUNK_SIZE, capturedPages.length);
+        for (let i = start; i < end; i++) {
           const pageId = `page_${i + 1}`;
-          try {
-            await setDoc(doc(db, 'submissions', submissionId, 'pages', pageId), {
-              pageIndex: i + 1,
-              imageDataUrl: pageDataUrl,
-              createdAt: serverTimestamp(),
-            });
-          } catch (err) {
+          batch.set(doc(db, 'submissions', submissionId, 'pages', pageId), {
+            pageIndex: i + 1,
+            imageDataUrl: capturedPages[i],
+            createdAt: serverTimestamp(),
+          });
+        }
+        chunkCommits.push(
+          batch.commit().catch((err) =>
             handleFirestoreError(
               err,
               OperationType.CREATE,
-              `submissions/${submissionId}/pages/${pageId}`
-            );
-          }
-        })
-      );
+              `submissions/${submissionId}/pages/batch_${start + 1}`
+            )
+          )
+        );
+      }
+      await Promise.all(chunkCommits);
 
       stopCamera();
       setSubmissions((prev) => [submissionDoc, ...prev.filter((s) => s.submissionId !== submissionId)]);
@@ -1074,7 +1138,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
                 )}
                 <span>
                   {processingPhotos
-                    ? 'Optimizing Photo(s)...'
+                    ? photoProgressText || 'Optimizing Photo(s)...'
                     : 'Capture via Phone Camera / Add Photos'}
                 </span>
                 <input

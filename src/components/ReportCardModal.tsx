@@ -5,6 +5,7 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import type { SubmissionReport } from '../types';
 import { formatDateTimeReadable } from '../utils/indianMobile';
 import { downloadStudentReportCardPdf } from '../utils/pdfGenerator';
+import { parseJsonResponse } from '../utils/safeFetch';
 
 interface ReportCardModalProps {
   submission: SubmissionReport | null;
@@ -41,12 +42,12 @@ export const ReportCardModal: React.FC<ReportCardModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(submission),
       });
-      const data = (await resp.json()) as {
+      const data = await parseJsonResponse<{
         sent?: boolean;
         status?: SubmissionReport['emailStatus'];
         sentAt?: string;
         error?: string;
-      };
+      }>(resp);
 
       const nextStatus: SubmissionReport['emailStatus'] = data.sent
         ? 'sent'
