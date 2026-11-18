@@ -1,0 +1,209 @@
+{
+  "entities": {
+    "StudentProfile": {
+      "title": "Student Profile",
+      "description": "Registered student profile linked to Google Auth UID with Indian mobile validation.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "school": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "studentClass": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "studentMobile": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[6-9][0-9]{9}$" },
+        "guardianMobile": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[6-9][0-9]{9}$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "school", "studentClass", "studentMobile", "guardianMobile", "email", "createdAt", "updatedAt"]
+    },
+    "TeacherRecord": {
+      "title": "Teacher Record",
+      "description": "Teacher account created by Admin with username and hashed credentials.",
+      "type": "object",
+      "properties": {
+        "teacherId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "username": { "type": "string", "minLength": 3, "maxLength": 60, "pattern": "^[a-zA-Z0-9_.\\-]+$" },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "authKeyHash": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
+        "active": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teacherId", "fullName", "username", "subject", "authKeyHash", "active", "createdBy", "createdAt"]
+    },
+    "TeacherAuthLookup": {
+      "title": "Teacher Auth Lookup",
+      "description": "Keyed by SHA-256 of username:password for zero-enumeration teacher login.",
+      "type": "object",
+      "properties": {
+        "teacherId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "username": { "type": "string", "minLength": 3, "maxLength": 60 },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teacherId", "fullName", "username", "subject", "active", "createdAt"]
+    },
+    "TeacherSession": {
+      "title": "Teacher Session",
+      "description": "Verified teacher session binding Firebase UID to an active TeacherAuthLookup.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teacherId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 3, "maxLength": 60 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "authKeyHash": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "teacherId", "username", "fullName", "subject", "authKeyHash", "createdAt"]
+    },
+    "AdminRecord": {
+      "title": "Admin Record",
+      "description": "Admin session document for multi-device administration.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "ExamTest": {
+      "title": "Exam Test",
+      "description": "Assessment created by Teacher or Admin with question items and encrypted ideal answer key.",
+      "type": "object",
+      "properties": {
+        "testId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "targetClass": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "subject": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "startTime": { "type": "string", "minLength": 10, "maxLength": 40 },
+        "expiryTime": { "type": "string", "minLength": 10, "maxLength": 40 },
+        "downloadDurationMins": { "type": "integer" },
+        "submitDurationMins": { "type": "integer" },
+        "totalQuestions": { "type": "integer" },
+        "marksPerQuestion": { "type": "number" },
+        "totalMarks": { "type": "number" },
+        "questions": { "type": "array" },
+        "encryptedAnswerKey": { "type": "string", "minLength": 10, "maxLength": 200000 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 100 },
+        "createdByRole": { "type": "string", "enum": ["teacher", "admin"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "testId", "title", "targetClass", "subject", "startTime", "expiryTime",
+        "downloadDurationMins", "submitDurationMins", "totalQuestions",
+        "marksPerQuestion", "totalMarks", "questions", "encryptedAnswerKey",
+        "createdByUid", "createdByName", "createdByRole", "active", "createdAt", "updatedAt"
+      ]
+    },
+    "ExamAnswerKey": {
+      "title": "Exam Answer Key",
+      "description": "Teacher/Admin plaintext ideal answers stored separately from student-readable test doc.",
+      "type": "object",
+      "properties": {
+        "testId": { "type": "string", "maxLength": 128 },
+        "idealAnswers": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["testId", "idealAnswers", "updatedAt"]
+    },
+    "SubmissionReport": {
+      "title": "Submission Report",
+      "description": "Student exam submission and AI-evaluated detailed report card.",
+      "type": "object",
+      "properties": {
+        "submissionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "testId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "testTitle": { "type": "string", "maxLength": 140 },
+        "subject": { "type": "string", "maxLength": 80 },
+        "targetClass": { "type": "string", "maxLength": 40 },
+        "expiryTime": { "type": "string", "maxLength": 40 },
+        "testCreatorUid": { "type": "string", "maxLength": 128 },
+        "studentUid": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 100 },
+        "studentSchool": { "type": "string", "maxLength": 140 },
+        "studentEmail": { "type": "string", "maxLength": 160 },
+        "studentMobile": { "type": "string", "pattern": "^[6-9][0-9]{9}$", "maxLength": 10 },
+        "guardianMobile": { "type": "string", "pattern": "^[6-9][0-9]{9}$", "maxLength": 10 },
+        "acceptedInstructionsAt": { "type": "string", "maxLength": 40 },
+        "downloadedPaperAt": { "type": "string", "maxLength": 40 },
+        "submittedAt": { "type": "string", "maxLength": 40 },
+        "pageCount": { "type": "integer" },
+        "obtainedMarks": { "type": "number" },
+        "totalMarks": { "type": "number" },
+        "percentage": { "type": "number" },
+        "questionReports": { "type": "array" },
+        "overallAdvice": { "type": "string", "maxLength": 4000 },
+        "emailStatus": { "type": "string", "enum": ["scheduled", "sent", "pending_smtp", "failed"] },
+        "emailSentAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "submissionId", "testId", "testTitle", "subject", "targetClass", "expiryTime",
+        "testCreatorUid", "studentUid", "studentName", "studentSchool", "studentEmail",
+        "studentMobile", "guardianMobile", "acceptedInstructionsAt", "downloadedPaperAt",
+        "submittedAt", "pageCount", "obtainedMarks", "totalMarks", "percentage",
+        "questionReports", "overallAdvice", "emailStatus", "emailSentAt", "createdAt", "updatedAt"
+      ]
+    },
+    "SubmissionPage": {
+      "title": "Submission Page Image",
+      "description": "Individual compressed answer copy page photo stored under submission.",
+      "type": "object",
+      "properties": {
+        "pageIndex": { "type": "integer" },
+        "imageDataUrl": { "type": "string", "maxLength": 400000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["pageIndex", "imageDataUrl", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentProfile" },
+      "description": "Student profiles with Indian mobile validation; owner and admin read/write only."
+    },
+    "/teachers/{teacherId}": {
+      "schema": { "$ref": "#/entities/TeacherRecord" },
+      "description": "Teacher roster managed solely by Admin."
+    },
+    "/teacherAuth/{authKeyHash}": {
+      "schema": { "$ref": "#/entities/TeacherAuthLookup" },
+      "description": "Non-enumerable SHA-256 credential lookup documents for Teacher login."
+    },
+    "/teacherSessions/{uid}": {
+      "schema": { "$ref": "#/entities/TeacherSession" },
+      "description": "Verified active teacher sessions bound to Firebase UID."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Verified secondary admin records."
+    },
+    "/tests/{testId}": {
+      "schema": { "$ref": "#/entities/ExamTest" },
+      "description": "Tests available for students to download and submit; ideal answers encrypted."
+    },
+    "/tests/{testId}/answerKey/{keyId}": {
+      "schema": { "$ref": "#/entities/ExamAnswerKey" },
+      "description": "Teacher/Admin plaintext ideal answers protected from student reads."
+    },
+    "/submissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/SubmissionReport" },
+      "description": "Student exam submissions and AI-evaluated detailed report cards."
+    },
+    "/submissions/{submissionId}/pages/{pageId}": {
+      "schema": { "$ref": "#/entities/SubmissionPage" },
+      "description": "Compressed handwritten answer copy pages (up to 20 per submission)."
+    }
+  }
+}

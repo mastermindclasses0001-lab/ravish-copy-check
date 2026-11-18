@@ -1,0 +1,6 @@
+{
+  "name": "Safal Academy Live",
+  "description": "Mobile-first PWA examination, AI copy evaluation, colorful PDF report card, and school assessment platform for Students, Teachers, and Admins.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
