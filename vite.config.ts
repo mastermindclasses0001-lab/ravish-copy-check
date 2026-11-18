@@ -25,7 +25,7 @@ export default defineConfig(() => {
           name: 'Safal Academy Live',
           short_name: 'SafalLive',
           description:
-            'Mobile-first PWA examination, AI copy evaluation, colorful PDF report card, and school assessment platform.',
+            'Mobile-first PWA examination, AI copy evaluation, official PDF report card, and school assessment platform.',
           theme_color: '#1E3A8A',
           background_color: '#F8FAFC',
           display: 'standalone',

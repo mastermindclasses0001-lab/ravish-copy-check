@@ -72,7 +72,7 @@ export const ReportCardModal: React.FC<ReportCardModalProps> = ({
       } else {
         setEmailFeedback(
           data.error ||
-            'SMTP email credentials are not configured yet in Secrets. You can still download the colorful Report Card PDF directly.'
+            'Email credentials are not configured yet. You can still download the official Report Card PDF directly.'
         );
       }
     } catch (err) {
@@ -213,7 +213,7 @@ export const ReportCardModal: React.FC<ReportCardModalProps> = ({
               ) : (
                 <FileDown className="w-4 h-4" />
               )}
-              {downloadingPdf ? 'Generating PDF...' : 'Download Colorful PDF'}
+              {downloadingPdf ? 'Generating PDF...' : 'Download Report Card PDF'}
             </button>
           </div>
         </div>

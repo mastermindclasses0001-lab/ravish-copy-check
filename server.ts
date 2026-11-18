@@ -498,7 +498,7 @@ async function sendReportCardEmail(job: EmailJobPayload): Promise<{ sent: boolea
     </div>
     <div style="background:#ffffff;padding:24px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 14px 14px;">
       <p style="margin:0 0 12px;font-size:15px;color:#0f172a;">Dear <strong>${escapeHtml(job.studentName)}</strong> &amp; Guardian,</p>
-      <p style="margin:0 0 16px;font-size:14px;color:#334155;">The examination window for <strong>${escapeHtml(job.testTitle)}</strong> (${escapeHtml(job.subject)}) has concluded. Please find your evaluated performance summary below and the colorful PDF Report Card attached.</p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;">The examination window for <strong>${escapeHtml(job.testTitle)}</strong> (${escapeHtml(job.subject)}) has concluded. Please find your evaluated performance summary below and the official PDF Report Card attached.</p>
       <table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px;">
         <tr><td style="padding:8px;border:1px solid #e2e8f0;background:#f8fafc;"><strong>Student Name</strong></td><td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(job.studentName)}</td></tr>
         <tr><td style="padding:8px;border:1px solid #e2e8f0;background:#f8fafc;"><strong>Class &amp; School</strong></td><td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(job.targetClass)} · ${escapeHtml(job.studentSchool)}</td></tr>

@@ -164,7 +164,7 @@ export default function App() {
                       Honest Notebook Exams, Evaluated with Clarity.
                     </h1>
                     <p className="mt-4 text-base text-slate-600 leading-relaxed max-w-2xl">
-                      Students download colorful question papers, write answers neatly on paper in their guardian&apos;s presence, and submit up to 20 pages via mobile rear camera for automatic evaluation and emailed report cards after test expiry.
+                      Students download official question papers, write answers neatly on paper in their guardian&apos;s presence, and submit up to 20 pages via mobile rear camera for automatic evaluation and emailed report cards after test expiry.
                     </p>
                   </div>
 
@@ -233,7 +233,7 @@ export default function App() {
                     Guided Notebook Testing
                   </h2>
                   <p className="text-sm text-slate-600 mt-2 leading-relaxed">
-                    Register once with Indian student &amp; guardian mobile numbers, read bilingual instructions, download colorful Safal Academy Live question papers, and upload up to 20 notebook photos using your rear camera.
+                    Register once with Indian student &amp; guardian mobile numbers, read bilingual instructions, download official Safal Academy Live question papers, and upload up to 20 notebook photos using your rear camera.
                   </p>
                 </div>
 
@@ -253,7 +253,7 @@ export default function App() {
                     Merit Rankings &amp; Roster Control
                   </h2>
                   <p className="text-sm text-slate-600 mt-2 leading-relaxed">
-                    Manage teachers and students, create any test, download colorful class merit ranking PDFs, and inspect or dispatch every student&apos;s evaluated report card PDF.
+                    Manage teachers and students, create any test, download class merit ranking PDFs, and inspect or dispatch every student&apos;s evaluated report card PDF.
                   </p>
                 </div>
               </section>

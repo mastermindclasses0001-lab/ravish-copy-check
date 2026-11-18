@@ -953,7 +953,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                 <div className="text-xs font-semibold text-slate-500">Step 1 · Question Paper</div>
                 <h4 className="text-base font-bold text-slate-900 mt-1">
-                  Download Colorful Question PDF
+                  Download Question Paper PDF
                 </h4>
                 <p className="text-xs text-slate-600 mt-1 leading-relaxed">
                   Download the Safal Academy Live question paper, write your answers neatly on notebook pages, and come back here to upload.
@@ -1163,7 +1163,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
             </p>
             <div className="rounded-xl bg-blue-50 border border-blue-200 p-4 max-w-xl mx-auto text-sm text-blue-950 leading-relaxed">
               <p className="font-semibold">
-                Your detailed colorful Report Card PDF will be automatically sent to your email (
+                Your detailed Report Card PDF will be automatically sent to your email (
                 <span className="underline">{lastSubmitted.studentEmail}</span>) after the test expires on{' '}
                 <span className="font-bold">{formatDateTimeReadable(lastSubmitted.expiryTime)}</span>.
               </p>
@@ -1188,7 +1188,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
                   className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer min-h-[48px]"
                 >
                   <FileDown className="w-4 h-4" />
-                  Download Colorful PDF
+                  Download Report Card PDF
                 </button>
               </div>
             )}
