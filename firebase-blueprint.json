@@ -12,6 +12,8 @@
         "studentMobile": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[6-9][0-9]{9}$" },
         "guardianMobile": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[6-9][0-9]{9}$" },
         "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "selfiePhotoUrl": { "type": "string", "maxLength": 140000 },
+        "selfieVerifiedAt": { "type": "string", "maxLength": 40 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -130,10 +132,12 @@
         "testCreatorUid": { "type": "string", "maxLength": 128 },
         "studentUid": { "type": "string", "maxLength": 128 },
         "studentName": { "type": "string", "maxLength": 100 },
+        "studentClass": { "type": "string", "maxLength": 40 },
         "studentSchool": { "type": "string", "maxLength": 140 },
         "studentEmail": { "type": "string", "maxLength": 160 },
         "studentMobile": { "type": "string", "pattern": "^[6-9][0-9]{9}$", "maxLength": 10 },
         "guardianMobile": { "type": "string", "pattern": "^[6-9][0-9]{9}$", "maxLength": 10 },
+        "studentPhotoUrl": { "type": "string", "maxLength": 140000 },
         "acceptedInstructionsAt": { "type": "string", "maxLength": 40 },
         "downloadedPaperAt": { "type": "string", "maxLength": 40 },
         "submittedAt": { "type": "string", "maxLength": 40 },
@@ -154,6 +158,36 @@
         "studentMobile", "guardianMobile", "acceptedInstructionsAt", "downloadedPaperAt",
         "submittedAt", "pageCount", "obtainedMarks", "totalMarks", "percentage",
         "questionReports", "overallAdvice", "emailStatus", "emailSentAt", "createdAt", "updatedAt"
+      ]
+    },
+    "TestTopper": {
+      "title": "Test Topper Showcase (12 Hours)",
+      "description": "PII-free public Rank #1 topper card per test, shown on Home page for 12 hours only.",
+      "type": "object",
+      "properties": {
+        "testId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "submissionId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "testTitle": { "type": "string", "maxLength": 140 },
+        "subject": { "type": "string", "maxLength": 80 },
+        "targetClass": { "type": "string", "maxLength": 40 },
+        "studentUid": { "type": "string", "maxLength": 128 },
+        "studentName": { "type": "string", "maxLength": 100 },
+        "studentClass": { "type": "string", "maxLength": 40 },
+        "studentPhotoUrl": { "type": "string", "maxLength": 140000 },
+        "obtainedMarks": { "type": "number" },
+        "totalMarks": { "type": "number" },
+        "percentage": { "type": "number" },
+        "submittedAt": { "type": "string", "maxLength": 40 },
+        "featuredAt": { "type": "string", "maxLength": 40 },
+        "expiresAt": { "type": "string", "maxLength": 40 },
+        "expiresAtMs": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "testId", "submissionId", "testTitle", "subject", "targetClass",
+        "studentUid", "studentName", "studentClass", "studentPhotoUrl",
+        "obtainedMarks", "totalMarks", "percentage", "submittedAt",
+        "featuredAt", "expiresAt", "expiresAtMs", "updatedAt"
       ]
     },
     "SubmissionPage": {
@@ -204,6 +238,10 @@
     "/submissions/{submissionId}/pages/{pageId}": {
       "schema": { "$ref": "#/entities/SubmissionPage" },
       "description": "Compressed handwritten answer copy pages (up to 20 per submission)."
+    },
+    "/testToppers/{testId}": {
+      "schema": { "$ref": "#/entities/TestTopper" },
+      "description": "PII-free public Rank #1 topper showcase per test (12-hour window)."
     }
   }
 }

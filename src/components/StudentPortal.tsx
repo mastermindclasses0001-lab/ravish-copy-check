@@ -13,6 +13,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import {
+  AlertCircle,
   ArrowLeft,
   Camera,
   CheckCircle2,
@@ -21,9 +22,11 @@ import {
   FileText,
   ImagePlus,
   Loader2,
+  RotateCcw,
   ShieldCheck,
   Trash2,
   Upload,
+  UserCheck,
 } from 'lucide-react';
 import {
   db,
@@ -44,9 +47,11 @@ import {
 } from '../utils/pdfGenerator';
 import {
   captureVideoFrameAsDataUrl,
+  compressImageFile,
   compressImageFilesInBatches,
 } from '../utils/imageCompress';
 import { parseJsonResponse } from '../utils/safeFetch';
+import { syncTestTopperOnSubmit } from '../utils/topperSync';
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { ReportCardModal } from './ReportCardModal';
 
@@ -72,6 +77,18 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
   const [guardianMobile, setGuardianMobile] = useState('');
   const [formError, setFormError] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
+
+  // Mandatory Live Selfie & AI Verification state
+  const selfieVideoRef = useRef<HTMLVideoElement | null>(null);
+  const selfieStreamRef = useRef<MediaStream | null>(null);
+  const [selfiePhotoUrl, setSelfiePhotoUrl] = useState('');
+  const [selfieVerifiedAt, setSelfieVerifiedAt] = useState('');
+  const [selfieVerified, setSelfieVerified] = useState(false);
+  const [verifyingSelfie, setVerifyingSelfie] = useState(false);
+  const [selfieStatusMsg, setSelfieStatusMsg] = useState('');
+  const [selfieError, setSelfieError] = useState('');
+  const [selfieCameraActive, setSelfieCameraActive] = useState(false);
+  const [selfieCameraError, setSelfieCameraError] = useState('');
 
   // Tests & submissions
   const [tests, setTests] = useState<ExamTest[]>([]);
@@ -135,6 +152,11 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
       setProfile(null);
       setTests([]);
       setSubmissions([]);
+      setSelfiePhotoUrl('');
+      setSelfieVerifiedAt('');
+      setSelfieVerified(false);
+      setSelfieStatusMsg('');
+      setSelfieError('');
       return;
     }
 
@@ -153,9 +175,20 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
           setStudentClass(data.studentClass);
           setStudentMobile(data.studentMobile);
           setGuardianMobile(data.guardianMobile);
+          const hasSavedSelfie = Boolean(data.selfiePhotoUrl && data.selfiePhotoUrl.length >= 30);
+          setSelfiePhotoUrl(data.selfiePhotoUrl || '');
+          setSelfieVerifiedAt(data.selfieVerifiedAt || '');
+          setSelfieVerified(hasSavedSelfie);
+          setSelfieStatusMsg(hasSavedSelfie ? 'Verified Human Selfie saved on profile.' : '');
+          setSelfieError('');
           setEditingProfile(false);
         } else {
           setProfile(null);
+          setSelfiePhotoUrl('');
+          setSelfieVerifiedAt('');
+          setSelfieVerified(false);
+          setSelfieStatusMsg('');
+          setSelfieError('');
           if (user.displayName && !name) setName(user.displayName);
         }
       } catch (err) {
@@ -270,6 +303,19 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     setCameraActive(false);
   };
 
+  // Stop front selfie camera on unmount or after capture
+  const stopSelfieCamera = () => {
+    if (selfieStreamRef.current) {
+      selfieStreamRef.current.getTracks().forEach((t) => t.stop());
+      selfieStreamRef.current = null;
+    }
+    setSelfieCameraActive(false);
+  };
+
+  useEffect(() => {
+    return () => stopSelfieCamera();
+  }, []);
+
   useEffect(() => {
     if (examStep !== 'camera') {
       stopCamera();
@@ -368,6 +414,121 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     }
   };
 
+  const startSelfieCamera = async () => {
+    setSelfieCameraError('');
+    setSelfieError('');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setSelfieCameraError('Live front camera browser me supported nahi hai. Neeche "Camera App se Selfie Len" button use karen.');
+      return;
+    }
+    try {
+      stopSelfieCamera();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'user' },
+          width: { ideal: 960 },
+          height: { ideal: 960 },
+        },
+        audio: false,
+      });
+      selfieStreamRef.current = stream;
+      setSelfieCameraActive(true);
+      setTimeout(() => {
+        if (selfieVideoRef.current) {
+          selfieVideoRef.current.srcObject = stream;
+          void selfieVideoRef.current.play();
+        }
+      }, 60);
+    } catch {
+      setSelfieCameraError(
+        'Front camera permission block hai ya available nahi hai. Camera permission allow karen ya "Camera App se Selfie Len" use karen.'
+      );
+      setSelfieCameraActive(false);
+    }
+  };
+
+  const verifySelfieWithAi = async (compressedDataUrl: string) => {
+    setSelfiePhotoUrl(compressedDataUrl);
+    setSelfieVerified(false);
+    setSelfieVerifiedAt('');
+    setSelfieError('');
+    setSelfieStatusMsg('AI clear human face check kar raha hai...');
+    setVerifyingSelfie(true);
+
+    try {
+      const resp = await fetch('/api/verify-student-selfie', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl: compressedDataUrl }),
+      });
+      const data = await parseJsonResponse<{
+        valid?: boolean;
+        faceCount?: number;
+        reason?: string;
+      }>(resp);
+
+      if (resp.ok && data.valid) {
+        setSelfieVerified(true);
+        setSelfieVerifiedAt(new Date().toISOString());
+        setSelfieStatusMsg(data.reason || 'Clear human selfie verified!');
+        setSelfieError('');
+      } else {
+        setSelfieVerified(false);
+        setSelfieVerifiedAt('');
+        setSelfieStatusMsg('');
+        setSelfieError(
+          data.reason ||
+            'Faltu/unclear photo reject ho gaya. Roshni me seedhe dekh kar apna clear single human selfie len.'
+        );
+      }
+    } catch (err) {
+      setSelfieVerified(false);
+      setSelfieVerifiedAt('');
+      setSelfieStatusMsg('');
+      setSelfieError(
+        err instanceof Error
+          ? `Selfie verify nahi ho paya: ${err.message}`
+          : 'Selfie verification fail ho gaya. Dubara try karen.'
+      );
+    } finally {
+      setVerifyingSelfie(false);
+    }
+  };
+
+  const captureSelfieFromVideo = () => {
+    if (!selfieVideoRef.current) return;
+    const compressed = captureVideoFrameAsDataUrl(selfieVideoRef.current, {
+      maxDim: 480,
+      quality: 0.72,
+      maxChars: 90_000,
+    });
+    if (compressed) {
+      stopSelfieCamera();
+      void verifySelfieWithAi(compressed);
+    }
+  };
+
+  const handleSelfieFileCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setSelfieCameraError('');
+    setSelfieError('');
+    try {
+      const compressed = await compressImageFile(file, {
+        maxDim: 480,
+        quality: 0.72,
+        maxChars: 90_000,
+      });
+      stopSelfieCamera();
+      await verifySelfieWithAi(compressed);
+    } catch (err) {
+      setSelfieError(
+        err instanceof Error ? err.message : 'Photo process nahi ho paya. Dubara selfie len.'
+      );
+    }
+  };
+
   const validateAndSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
@@ -394,6 +555,17 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
       return;
     }
 
+    if (verifyingSelfie) {
+      setFormError('Wait — AI abhi aapka selfie check kar raha hai. 2 second rukiye.');
+      return;
+    }
+    if (!selfiePhotoUrl || !selfieVerified) {
+      setFormError(
+        'Mandatory Selfie Required: Bina clear verified human selfie upload kiye login/save nahi hoga.'
+      );
+      return;
+    }
+
     setAuthBusy(true);
     try {
       let activeUser = user;
@@ -404,6 +576,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         throw new Error('Google account email is required.');
       }
 
+      const verifiedTimestamp = selfieVerifiedAt || new Date().toISOString();
       const payload: StudentProfile = {
         uid: activeUser.uid,
         name: cleanName,
@@ -412,6 +585,8 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         studentMobile: studentMobile.trim(),
         guardianMobile: guardianMobile.trim(),
         email: activeUser.email,
+        selfiePhotoUrl,
+        selfieVerifiedAt: verifiedTimestamp,
       };
 
       const docRef = doc(db, 'students', activeUser.uid);
@@ -441,6 +616,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         }
       }
 
+      stopSelfieCamera();
       setProfile(payload);
       setEditingProfile(false);
     } catch (err) {
@@ -630,10 +806,12 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         testCreatorUid: selectedTest.createdByUid,
         studentUid: user.uid,
         studentName: profile.name,
+        studentClass: profile.studentClass,
         studentSchool: profile.school,
         studentEmail: profile.email,
         studentMobile: profile.studentMobile,
         guardianMobile: profile.guardianMobile,
+        studentPhotoUrl: profile.selfiePhotoUrl || '',
         acceptedInstructionsAt: prog.acceptedAt || nowIso,
         downloadedPaperAt: prog.downloadedAt || nowIso,
         submittedAt: nowIso,
@@ -683,6 +861,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
       }
       await Promise.all(chunkCommits);
 
+      // Update public 12-hour Test Toppers showcase if this student is Rank #1
+      await syncTestTopperOnSubmit(submissionDoc, profile);
+
       stopCamera();
       setSubmissions((prev) => [submissionDoc, ...prev.filter((s) => s.submissionId !== submissionId)]);
       setLastSubmitted(submissionDoc);
@@ -710,19 +891,31 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     );
   }
 
-  // Registration / Profile Setup View (when not logged in or profile incomplete or editing)
-  if (!user || !profile || editingProfile) {
+  const needsMandatorySelfie = Boolean(user && profile && !profile.selfiePhotoUrl);
+
+  // Registration / Profile Setup View (when not logged in, profile incomplete/missing selfie, or editing)
+  if (!user || !profile || needsMandatorySelfie || editingProfile) {
     return (
       <div className="max-w-2xl mx-auto">
         <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-xs">
           <div className="pb-5 border-b border-slate-200">
             <h2 className="text-2xl font-bold text-slate-900">
-              {profile ? 'Update Student Details' : 'Student Entry — No Password Needed'}
+              {needsMandatorySelfie
+                ? 'Mandatory Selfie Verification Required'
+                : profile
+                  ? 'Update Student Details & Selfie'
+                  : 'Student Entry — No Password Needed'}
             </h2>
             <p className="text-sm text-slate-600 mt-1">
-              Enter your details with valid 10-digit Indian mobile numbers and continue using your Google Account.
+              Enter your details with valid 10-digit Indian mobile numbers, capture a clear live human selfie, and continue using your Google Account.
             </p>
           </div>
+
+          {needsMandatorySelfie && (
+            <div className="mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+              <strong>Mandatory Selfie Step:</strong> Har student ke liye apna saaf live human selfie upload karna zaroori hai (test dene aur Topper board ke liye). Kripya neeche apna clear face selfie capture karke Save karen.
+            </div>
+          )}
 
           {!user && (
             <div className="mt-5 rounded-xl bg-blue-50 border border-blue-200 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -746,7 +939,143 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
             </div>
           )}
 
-          <form onSubmit={validateAndSaveProfile} className="mt-6 space-y-4">
+          <form onSubmit={validateAndSaveProfile} className="mt-6 space-y-5">
+            {/* Mandatory Live Human Selfie Section */}
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Mandatory Student Selfie (Clear Human Face Only) *
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    Roshni me seedhe dekh kar apna saaf selfie len — faltu photo (diwar, copy, blind/dark frame ya cartoon) AI dwara reject ho jayega.
+                  </p>
+                </div>
+                {selfieVerified && (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 shrink-0">
+                    <UserCheck className="w-4 h-4" />
+                    Selfie Verified
+                  </span>
+                )}
+              </div>
+
+              {selfieCameraError && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
+                  {selfieCameraError}
+                </div>
+              )}
+
+              {selfieCameraActive ? (
+                <div className="space-y-3">
+                  <div className="mx-auto w-56 h-56 sm:w-64 sm:h-64 rounded-2xl overflow-hidden border-2 border-blue-900 bg-slate-950">
+                    <video
+                      ref={selfieVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover scale-x-[-1]"
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={captureSelfieFromVideo}
+                      className="inline-flex items-center gap-2 rounded-xl bg-blue-900 px-5 py-2.5 text-xs font-bold text-white hover:bg-blue-800 cursor-pointer min-h-[44px]"
+                    >
+                      <Camera className="w-4 h-4" />
+                      Capture Clear Selfie
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopSelfieCamera}
+                      className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer min-h-[44px]"
+                    >
+                      Close Camera
+                    </button>
+                  </div>
+                </div>
+              ) : selfiePhotoUrl ? (
+                <div className="flex flex-col sm:flex-row items-center gap-4">
+                  <img
+                    src={selfiePhotoUrl}
+                    alt="Student live selfie"
+                    className={`w-28 h-28 rounded-2xl object-cover border-2 shrink-0 ${
+                      selfieVerified
+                        ? 'border-emerald-500'
+                        : verifyingSelfie
+                          ? 'border-blue-600'
+                          : 'border-red-400'
+                    }`}
+                  />
+                  <div className="flex-1 text-center sm:text-left space-y-2">
+                    {verifyingSelfie && (
+                      <div className="inline-flex items-center gap-2 text-xs font-semibold text-blue-900">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        {selfieStatusMsg || 'AI verifying human selfie...'}
+                      </div>
+                    )}
+                    {!verifyingSelfie && selfieVerified && (
+                      <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-800">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>{selfieStatusMsg || 'Clear human selfie verified.'}</span>
+                      </div>
+                    )}
+                    {!verifyingSelfie && selfieError && (
+                      <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800 flex items-start gap-2 text-left">
+                        <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                        <span>{selfieError}</span>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 pt-1">
+                      <button
+                        type="button"
+                        disabled={verifyingSelfie}
+                        onClick={() => void startSelfieCamera()}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-blue-900 bg-white px-3.5 py-2 text-xs font-semibold text-blue-900 hover:bg-blue-50 cursor-pointer disabled:opacity-50 min-h-[40px]"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Retake Live Selfie
+                      </button>
+                      <label className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer min-h-[40px]">
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>Camera App Selfie</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="user"
+                          disabled={verifyingSelfie}
+                          onChange={(e) => void handleSelfieFileCapture(e)}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void startSelfieCamera()}
+                    className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-blue-900 px-4 py-3 text-xs sm:text-sm font-semibold text-white hover:bg-blue-800 cursor-pointer min-h-[46px]"
+                  >
+                    <Camera className="w-4 h-4" />
+                    Take Live Selfie (Front Camera)
+                  </button>
+                  <label className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-xs sm:text-sm font-semibold text-slate-800 hover:bg-slate-100 cursor-pointer min-h-[46px]">
+                    <ImagePlus className="w-4 h-4 text-blue-900" />
+                    <span>Camera App se Selfie Len</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="user"
+                      onChange={(e) => void handleSelfieFileCapture(e)}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">
@@ -839,10 +1168,13 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
             </div>
 
             <div className="pt-3 flex flex-col sm:flex-row items-center justify-between gap-3">
-              {editingProfile && (
+              {editingProfile && !needsMandatorySelfie && (
                 <button
                   type="button"
-                  onClick={() => setEditingProfile(false)}
+                  onClick={() => {
+                    stopSelfieCamera();
+                    setEditingProfile(false);
+                  }}
                   className="w-full sm:w-auto px-5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer min-h-[46px]"
                 >
                   Cancel
@@ -850,7 +1182,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
               )}
               <button
                 type="submit"
-                disabled={authBusy}
+                disabled={authBusy || verifyingSelfie}
                 className="w-full sm:w-auto ml-auto inline-flex items-center justify-center gap-2 rounded-xl bg-blue-900 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-800 transition-colors cursor-pointer disabled:opacity-60 min-h-[48px]"
               >
                 {authBusy && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -1276,17 +1608,26 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     <div className="space-y-6">
       {/* Student Profile Strip */}
       <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="text-xs font-semibold text-slate-500">
-            {profile.studentClass} · {profile.school}
-          </div>
-          <h2 className="text-xl font-bold text-slate-900 mt-0.5">{profile.name}</h2>
-          <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-2">
-            <span className="font-mono">Student: +91 {profile.studentMobile}</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono">Guardian: +91 {profile.guardianMobile}</span>
-            <span aria-hidden="true">·</span>
-            <span>{profile.email}</span>
+        <div className="flex items-center gap-4">
+          {profile.selfiePhotoUrl && (
+            <img
+              src={profile.selfiePhotoUrl}
+              alt={profile.name}
+              className="w-14 h-14 rounded-2xl object-cover border border-slate-200 shrink-0"
+            />
+          )}
+          <div>
+            <div className="text-xs font-semibold text-slate-500">
+              {profile.studentClass} · {profile.school}
+            </div>
+            <h2 className="text-xl font-bold text-slate-900 mt-0.5">{profile.name}</h2>
+            <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-2">
+              <span className="font-mono">Student: +91 {profile.studentMobile}</span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono">Guardian: +91 {profile.guardianMobile}</span>
+              <span aria-hidden="true">·</span>
+              <span>{profile.email}</span>
+            </div>
           </div>
         </div>
         <button
@@ -1294,7 +1635,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
           onClick={() => setEditingProfile(true)}
           className="px-4 py-2.5 rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer whitespace-nowrap min-h-[44px]"
         >
-          Edit Details
+          Edit Details / Retake Selfie
         </button>
       </div>
 

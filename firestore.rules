@@ -49,7 +49,7 @@ service cloud.firestore {
     // --- Pillar 2: Entity Validation Blueprints ---
     function isValidStudent(data) {
       return data.keys().hasAll(['uid', 'name', 'school', 'studentClass', 'studentMobile', 'guardianMobile', 'email', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'name', 'school', 'studentClass', 'studentMobile', 'guardianMobile', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'name', 'school', 'studentClass', 'studentMobile', 'guardianMobile', 'email', 'selfiePhotoUrl', 'selfieVerifiedAt', 'createdAt', 'updatedAt'])
         && data.uid is string && data.uid == request.auth.uid && data.uid.size() <= 128
         && data.name is string && data.name.size() >= 2 && data.name.size() <= 100
         && data.school is string && data.school.size() >= 2 && data.school.size() <= 140
@@ -57,6 +57,8 @@ service cloud.firestore {
         && isValidIndianMobile(data.studentMobile)
         && isValidIndianMobile(data.guardianMobile)
         && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && (!('selfiePhotoUrl' in data) || (data.selfiePhotoUrl is string && data.selfiePhotoUrl.size() >= 30 && data.selfiePhotoUrl.size() <= 140000))
+        && (!('selfieVerifiedAt' in data) || (data.selfieVerifiedAt is string && data.selfieVerifiedAt.size() <= 40))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -157,8 +159,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'submissionId', 'testId', 'testTitle', 'subject', 'targetClass', 'expiryTime',
-          'testCreatorUid', 'studentUid', 'studentName', 'studentSchool', 'studentEmail',
-          'studentMobile', 'guardianMobile', 'acceptedInstructionsAt', 'downloadedPaperAt',
+          'testCreatorUid', 'studentUid', 'studentName', 'studentClass', 'studentSchool', 'studentEmail',
+          'studentMobile', 'guardianMobile', 'studentPhotoUrl', 'acceptedInstructionsAt', 'downloadedPaperAt',
           'submittedAt', 'pageCount', 'obtainedMarks', 'totalMarks', 'percentage',
           'questionReports', 'overallAdvice', 'emailStatus', 'emailSentAt', 'createdAt', 'updatedAt'
         ])
@@ -171,10 +173,12 @@ service cloud.firestore {
         && data.testCreatorUid is string && data.testCreatorUid.size() <= 128
         && data.studentUid is string && data.studentUid.size() <= 128
         && data.studentName is string && data.studentName.size() >= 2 && data.studentName.size() <= 100
+        && (!('studentClass' in data) || (data.studentClass is string && data.studentClass.size() <= 40))
         && data.studentSchool is string && data.studentSchool.size() >= 2 && data.studentSchool.size() <= 140
         && data.studentEmail is string && data.studentEmail.size() >= 3 && data.studentEmail.size() <= 160
         && isValidIndianMobile(data.studentMobile)
         && isValidIndianMobile(data.guardianMobile)
+        && (!('studentPhotoUrl' in data) || (data.studentPhotoUrl is string && data.studentPhotoUrl.size() <= 140000))
         && data.acceptedInstructionsAt is string && data.acceptedInstructionsAt.size() <= 40
         && data.downloadedPaperAt is string && data.downloadedPaperAt.size() <= 40
         && data.submittedAt is string && data.submittedAt.size() <= 40
@@ -198,15 +202,49 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidTestTopper(data) {
+      return data.keys().hasAll([
+          'testId', 'submissionId', 'testTitle', 'subject', 'targetClass',
+          'studentUid', 'studentName', 'studentClass', 'studentPhotoUrl',
+          'obtainedMarks', 'totalMarks', 'percentage', 'submittedAt',
+          'featuredAt', 'expiresAt', 'expiresAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'testId', 'submissionId', 'testTitle', 'subject', 'targetClass',
+          'studentUid', 'studentName', 'studentClass', 'studentPhotoUrl',
+          'obtainedMarks', 'totalMarks', 'percentage', 'submittedAt',
+          'featuredAt', 'expiresAt', 'expiresAtMs', 'updatedAt'
+        ])
+        && isValidId(data.testId)
+        && isValidId(data.submissionId)
+        && data.testTitle is string && data.testTitle.size() >= 2 && data.testTitle.size() <= 140
+        && data.subject is string && data.subject.size() >= 2 && data.subject.size() <= 80
+        && data.targetClass is string && data.targetClass.size() >= 1 && data.targetClass.size() <= 40
+        && data.studentUid is string && data.studentUid.size() <= 128
+        && data.studentName is string && data.studentName.size() >= 2 && data.studentName.size() <= 100
+        && data.studentClass is string && data.studentClass.size() >= 1 && data.studentClass.size() <= 40
+        && data.studentPhotoUrl is string && data.studentPhotoUrl.size() <= 140000
+        && (data.obtainedMarks is int || data.obtainedMarks is float) && data.obtainedMarks >= 0 && data.obtainedMarks <= data.totalMarks
+        && (data.totalMarks is int || data.totalMarks is float) && data.totalMarks > 0 && data.totalMarks <= 10000
+        && (data.percentage is int || data.percentage is float) && data.percentage >= 0 && data.percentage <= 100
+        && data.submittedAt is string && data.submittedAt.size() <= 40
+        && data.featuredAt is string && data.featuredAt.size() <= 40
+        && data.expiresAt is string && data.expiresAt.size() <= 40
+        && data.expiresAtMs is int && data.expiresAtMs > 0
+        && data.updatedAt is timestamp;
+    }
+
     // --- Collection Rules ---
 
-    // 1. Students (PII isolated to owner & admin)
+    // 1. Students (PII isolated to owner & admin; mandatory verified selfie on profile)
     match /students/{studentId} {
       allow get: if isValidId(studentId) && (isOwner(studentId) || isAdmin());
       allow list: if isEmailAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
       allow create: if isValidId(studentId)
         && isOwner(studentId)
         && isValidStudent(incoming())
+        && incoming().selfiePhotoUrl is string && incoming().selfiePhotoUrl.size() >= 30
+        && incoming().selfieVerifiedAt is string && incoming().selfieVerifiedAt.size() >= 10
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isValidId(studentId)
@@ -216,7 +254,7 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           isAdmin() ||
-          (isOwner(studentId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'school', 'studentClass', 'studentMobile', 'guardianMobile', 'email', 'updatedAt']))
+          (isOwner(studentId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'school', 'studentClass', 'studentMobile', 'guardianMobile', 'email', 'selfiePhotoUrl', 'selfieVerifiedAt', 'updatedAt']))
         );
       allow delete: if isValidId(studentId) && isAdmin();
     }
@@ -372,6 +410,52 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isValidId(submissionId) && isValidId(pageId) && isAdmin();
       }
+    }
+
+    // 8. Test Toppers Showcase (PII-free public Rank #1 cards, 12-hour display window)
+    match /testToppers/{testId} {
+      allow get: if isValidId(testId);
+      allow list: if resource.data.expiresAtMs is int && resource.data.expiresAtMs > 0;
+      allow create: if isValidId(testId)
+        && isSignedIn()
+        && isValidTestTopper(incoming())
+        && incoming().testId == testId
+        && incoming().updatedAt == request.time
+        && incoming().expiresAtMs <= request.time.toMillis() + 43500000
+        && (isAdmin() || incoming().studentUid == request.auth.uid)
+        && exists(/databases/$(database)/documents/submissions/$(incoming().submissionId))
+        && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.testId == testId
+        && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.studentUid == incoming().studentUid
+        && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.obtainedMarks == incoming().obtainedMarks;
+      allow update: if isValidId(testId)
+        && isSignedIn()
+        && isValidTestTopper(incoming())
+        && incoming().testId == existing().testId
+        && incoming().updatedAt == request.time
+        && incoming().expiresAtMs <= request.time.toMillis() + 43500000
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'submissionId', 'testTitle', 'subject', 'targetClass',
+          'studentUid', 'studentName', 'studentClass', 'studentPhotoUrl',
+          'obtainedMarks', 'totalMarks', 'percentage', 'submittedAt',
+          'featuredAt', 'expiresAt', 'expiresAtMs', 'updatedAt'
+        ])
+        && exists(/databases/$(database)/documents/submissions/$(incoming().submissionId))
+        && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.testId == testId
+        && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.studentUid == incoming().studentUid
+        && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.obtainedMarks == incoming().obtainedMarks
+        && (
+          isAdmin() ||
+          (
+            incoming().studentUid == request.auth.uid &&
+            (
+              existing().expiresAtMs <= request.time.toMillis() ||
+              incoming().obtainedMarks > existing().obtainedMarks ||
+              (incoming().obtainedMarks == existing().obtainedMarks && incoming().submittedAt < existing().submittedAt) ||
+              existing().studentUid == request.auth.uid
+            )
+          )
+        );
+      allow delete: if isValidId(testId) && isAdmin();
     }
   }
 }

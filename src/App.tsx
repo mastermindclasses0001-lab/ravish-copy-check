@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
+import { collection, getDocs, limit, query, where } from 'firebase/firestore';
 import {
+  Award,
   BookOpenCheck,
   GraduationCap,
   Home,
@@ -14,8 +16,9 @@ import { OfflineIndicator } from './components/OfflineIndicator';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { StudentPortal } from './components/StudentPortal';
 import { TeacherPortal } from './components/TeacherPortal';
-import { auth, signOutUser } from './firebase';
-import type { RolePortal } from './types';
+import { auth, db, signOutUser } from './firebase';
+import type { RolePortal, TestTopper } from './types';
+import { formatTopperRemaining } from './utils/topperSync';
 
 const PORTAL_SESSION_KEY = 'safal_active_portal_v1';
 
@@ -33,6 +36,8 @@ export default function App() {
   });
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [toppers, setToppers] = useState<TestTopper[]>([]);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     try {
@@ -49,6 +54,39 @@ export default function App() {
     });
     return () => unsub();
   }, []);
+
+  useEffect(() => {
+    if (!authReady || portal !== 'home') return;
+    let cancelled = false;
+    const loadToppers = async () => {
+      try {
+        const tq = query(
+          collection(db, 'testToppers'),
+          where('expiresAtMs', '>', 0),
+          limit(30)
+        );
+        const snap = await getDocs(tq);
+        if (cancelled) return;
+        const rows = snap.docs.map((d) => d.data() as TestTopper);
+        setToppers(rows);
+        setNowMs(Date.now());
+      } catch (err) {
+        console.warn('Unable to load public test toppers:', err);
+      }
+    };
+    void loadToppers();
+    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [authReady, portal]);
+
+  const activeToppers = useMemo(() => {
+    return toppers
+      .filter((t) => Number.isFinite(t.expiresAtMs) && t.expiresAtMs > nowMs)
+      .sort((a, b) => new Date(b.featuredAt).getTime() - new Date(a.featuredAt).getTime());
+  }, [toppers, nowMs]);
 
   const handleGlobalSignOut = async () => {
     await signOutUser();
@@ -224,6 +262,93 @@ export default function App() {
                   />
                 </div>
               </section>
+
+              {/* Recent Test Toppers Showcase (Per Test, Valid for 12 Hours Only) */}
+              {activeToppers.length > 0 && (
+                <section className="space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2 text-xs font-semibold text-amber-700">
+                        <Award className="w-4 h-4 text-amber-600" />
+                        <span>TEST TOPPERS · LAST 12 HOURS</span>
+                      </div>
+                      <h2 className="text-xl sm:text-2xl font-bold text-slate-950 mt-1">
+                        Recent Rank #1 Achievers
+                      </h2>
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      Each test&apos;s topper is highlighted here for 12 hours.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {activeToppers.map((topper) => (
+                      <article
+                        key={topper.testId}
+                        className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col justify-between gap-4"
+                      >
+                        <div>
+                          <div className="text-xs font-medium text-slate-500 flex flex-wrap items-center justify-between gap-2">
+                            <span>
+                              {topper.targetClass} · {topper.subject}
+                            </span>
+                            <span className="font-semibold text-amber-700 tabular-nums">
+                              Rank #1 · {formatTopperRemaining(topper.expiresAtMs, nowMs)}
+                            </span>
+                          </div>
+                          <h3 className="text-base font-bold text-slate-900 mt-1 line-clamp-1">
+                            {topper.testTitle}
+                          </h3>
+                        </div>
+
+                        <div className="flex items-center gap-3.5">
+                          {topper.studentPhotoUrl ? (
+                            <img
+                              src={topper.studentPhotoUrl}
+                              alt={topper.studentName}
+                              className="w-16 h-16 rounded-2xl object-cover border border-slate-200 bg-slate-100 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-16 h-16 rounded-2xl bg-blue-950 text-white flex items-center justify-center text-lg font-bold shrink-0">
+                              {topper.studentName.slice(0, 1).toUpperCase()}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="text-base font-bold text-slate-950 truncate">
+                              {topper.studentName}
+                            </div>
+                            <div className="text-xs font-medium text-slate-600 mt-0.5">
+                              Student Class: {topper.studentClass}
+                            </div>
+                            <div className="text-xs text-slate-500 mt-0.5">
+                              Test Class: {topper.targetClass}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-4">
+                          <div>
+                            <div className="text-[11px] font-medium text-slate-500">
+                              Obtained Marks
+                            </div>
+                            <div className="text-base font-bold text-slate-950 tabular-nums">
+                              {topper.obtainedMarks} / {topper.totalMarks}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-[11px] font-medium text-slate-500">
+                              Percentage
+                            </div>
+                            <div className="text-base font-bold text-emerald-700 tabular-nums">
+                              {topper.percentage.toFixed(1)}%
+                            </div>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
 
               {/* 3 Role Summary Columns */}
               <section className="grid grid-cols-1 md:grid-cols-3 gap-6">

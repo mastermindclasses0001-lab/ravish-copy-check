@@ -849,6 +849,132 @@ async function startServer() {
     }
   });
 
+  app.post('/api/verify-student-selfie', async (req, res) => {
+    try {
+      const { imageDataUrl } = req.body as { imageDataUrl?: string };
+      if (
+        typeof imageDataUrl !== 'string' ||
+        !imageDataUrl.startsWith('data:image/') ||
+        imageDataUrl.length > 2_000_000
+      ) {
+        res.status(400).json({
+          valid: false,
+          reason: 'Invalid photo format. Please capture a clear human selfie using your camera.',
+        });
+        return;
+      }
+
+      const match = imageDataUrl.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (!match) {
+        res.status(400).json({
+          valid: false,
+          reason: 'Invalid image encoding. Please capture a fresh selfie.',
+        });
+        return;
+      }
+
+      const mimeType = match[1];
+      const base64Data = match[2];
+      const ai = createGenAIClient();
+
+      const prompt = `You are a strict student identity photo verifier for Safal Academy Live.
+Inspect this uploaded student selfie image carefully.
+
+Approve (isValidHumanSelfie: true) ONLY if ALL of these are true:
+1. It is a real, live-looking photograph of ONE clear human face (a real student selfie/portrait).
+2. The person's face (eyes, nose, mouth, forehead/head) is clearly visible, recognizable, upright/natural, and not covered by a mask, hand, cloth, or heavy shadow.
+3. The lighting and focus are clear enough to identify the student properly (not pitch black, washed out, or heavily blurred).
+
+Reject (isValidHumanSelfie: false) if ANY of these are true:
+- No real human face is visible (e.g., wall, ceiling, floor, sky, fan, notebook, textbook, pen, desk, bag, blank black/white frame, animal).
+- Cartoon, anime, illustration, painting, AI avatar, sticker, doll/statue, or a photo taken of another mobile/laptop screen or printed photo.
+- Multiple human faces in the frame (faceCount > 1) or no face (faceCount == 0).
+- Face is hidden, side-profile silhouette, too blurry, or pitch dark.
+
+Return JSON matching the exact schema:
+- isValidHumanSelfie: boolean
+- faceCount: integer
+- reason: short helpful message in simple Hinglish/English explaining either confirmation ("Clear human selfie verified.") or exact reason to retake ("Chehra saaf nahi dikh raha hai — roshni me seedhe dekh kar apna clear selfie len.").`;
+
+      let lastErr: unknown = null;
+      let parsed: {
+        isValidHumanSelfie?: boolean;
+        faceCount?: number;
+        reason?: string;
+      } | null = null;
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType,
+                    data: base64Data,
+                  },
+                },
+                { text: prompt },
+              ],
+            },
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  isValidHumanSelfie: { type: Type.BOOLEAN },
+                  faceCount: { type: Type.INTEGER },
+                  reason: { type: Type.STRING },
+                },
+                required: ['isValidHumanSelfie', 'faceCount', 'reason'],
+              },
+            },
+          });
+
+          const rawText = (response.text ?? '{}').trim();
+          parsed = JSON.parse(rawText);
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (!isRetryableGeminiError(err) || attempt >= 2) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
+        }
+      }
+
+      if (!parsed || typeof parsed.isValidHumanSelfie !== 'boolean') {
+        const msg = lastErr instanceof Error ? lastErr.message : 'Selfie verification failed.';
+        res.status(502).json({
+          valid: false,
+          reason: `AI selfie verification fail ho gaya (${msg}). Please try again.`,
+        });
+        return;
+      }
+
+      const valid = parsed.isValidHumanSelfie === true && Number(parsed.faceCount) === 1;
+      const reason =
+        parsed.reason?.trim() ||
+        (valid
+          ? 'Clear human selfie verified.'
+          : 'Saaf human selfie nahi mila — kripya achhi roshni me apna single clear face photo len.');
+
+      res.json({
+        valid,
+        faceCount: Number(parsed.faceCount ?? 0),
+        reason,
+      });
+    } catch (err) {
+      console.error('Verify selfie error:', err);
+      res.status(500).json({
+        valid: false,
+        reason: err instanceof Error ? err.message : 'Selfie verification error.',
+      });
+    }
+  });
+
   app.post('/api/grade-submission', async (req, res) => {
     const wantsStream =
       req.query.stream === '1' ||

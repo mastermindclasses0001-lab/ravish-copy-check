@@ -48,6 +48,7 @@ import {
   downloadQuestionPaperPdf,
 } from '../utils/pdfGenerator';
 import { parseJsonResponse } from '../utils/safeFetch';
+import { syncAdminTestToppers } from '../utils/topperSync';
 import { ConfirmModal } from './ConfirmModal';
 import { EditTestModal } from './EditTestModal';
 import { ReportCardModal } from './ReportCardModal';
@@ -155,7 +156,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       setSubmissions(loadedSubs);
 
       setTeachers(teachersSnap.docs.map((d) => d.data() as TeacherRecord));
-      setStudents(studentsSnap.docs.map((d) => d.data() as StudentProfile));
+      const loadedStudents = studentsSnap.docs.map((d) => d.data() as StudentProfile);
+      setStudents(loadedStudents);
+
+      void syncAdminTestToppers(loadedTests, loadedSubs, loadedStudents);
 
       try {
         const esResp = await fetch('/api/email-status');
@@ -821,6 +825,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                         confirmLabel: 'Delete Test',
                         run: async () => {
                           await deleteDoc(doc(db, 'tests', activeSelectedTest.testId));
+                          await deleteDoc(doc(db, 'testToppers', activeSelectedTest.testId)).catch(() => {});
                           setTests((prev) =>
                             prev.filter((t) => t.testId !== activeSelectedTest.testId)
                           );
@@ -1017,6 +1022,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                             confirmLabel: 'Delete Test',
                             run: async () => {
                               await deleteDoc(doc(db, 'tests', t.testId));
+                              await deleteDoc(doc(db, 'testToppers', t.testId)).catch(() => {});
                               setTests((prev) => prev.filter((item) => item.testId !== t.testId));
                             },
                           })
@@ -1219,7 +1225,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                 <tbody className="divide-y divide-slate-100 text-sm">
                   {students.map((stu) => (
                     <tr key={stu.uid} className="hover:bg-slate-50">
-                      <td className="py-3 px-4 font-semibold text-slate-900">{stu.name}</td>
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-3">
+                          {stu.selfiePhotoUrl ? (
+                            <img
+                              src={stu.selfiePhotoUrl}
+                              alt={stu.name}
+                              className="w-9 h-9 rounded-xl object-cover border border-slate-200 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-9 h-9 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-xs font-bold text-slate-500 shrink-0">
+                              {stu.name.slice(0, 1).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <div className="font-semibold text-slate-900">{stu.name}</div>
+                            {!stu.selfiePhotoUrl && (
+                              <div className="text-[11px] text-amber-700">Selfie pending</div>
+                            )}
+                          </div>
+                        </div>
+                      </td>
                       <td className="py-3 px-4">
                         <div className="font-medium text-slate-800">{stu.studentClass}</div>
                         <div className="text-xs text-slate-500">{stu.school}</div>

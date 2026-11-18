@@ -8,6 +8,8 @@ export interface StudentProfile {
   studentMobile: string;
   guardianMobile: string;
   email: string;
+  selfiePhotoUrl?: string;
+  selfieVerifiedAt?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
@@ -86,10 +88,12 @@ export interface SubmissionReport {
   testCreatorUid: string;
   studentUid: string;
   studentName: string;
+  studentClass?: string;
   studentSchool: string;
   studentEmail: string;
   studentMobile: string;
   guardianMobile: string;
+  studentPhotoUrl?: string;
   acceptedInstructionsAt: string;
   downloadedPaperAt: string;
   submittedAt: string;
@@ -102,5 +106,25 @@ export interface SubmissionReport {
   emailStatus: 'scheduled' | 'sent' | 'pending_smtp' | 'failed';
   emailSentAt: string;
   createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface TestTopper {
+  testId: string;
+  submissionId: string;
+  testTitle: string;
+  subject: string;
+  targetClass: string;
+  studentUid: string;
+  studentName: string;
+  studentClass: string;
+  studentPhotoUrl: string;
+  obtainedMarks: number;
+  totalMarks: number;
+  percentage: number;
+  submittedAt: string;
+  featuredAt: string;
+  expiresAt: string;
+  expiresAtMs: number;
   updatedAt?: unknown;
 }
