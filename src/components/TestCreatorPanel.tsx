@@ -12,7 +12,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import type { ExamTest, IdealAnswerItem, QuestionItem } from '../types';
+import type { AiThinkingPreset, AppAiConfig, ExamTest, IdealAnswerItem, QuestionItem } from '../types';
 import {
   CLASS_OPTIONS,
   SUBJECT_OPTIONS,
@@ -23,6 +23,13 @@ import {
   captureVideoFrameAsDataUrl,
   compressImageFile,
 } from '../utils/imageCompress';
+import {
+  AI_THINKING_OPTIONS,
+  DEFAULT_AI_CONFIG,
+  getAiLevelOption,
+  saveAiConfig,
+  subscribeAiConfig,
+} from '../utils/aiConfig';
 import { parseJsonResponse } from '../utils/safeFetch';
 
 interface TestCreatorPanelProps {
@@ -117,6 +124,16 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [createdTest, setCreatedTest] = useState<ExamTest | null>(null);
+  const [aiConfig, setAiConfig] = useState<AppAiConfig>(DEFAULT_AI_CONFIG);
+  const [updatingAiLevel, setUpdatingAiLevel] = useState(false);
+
+  useEffect(() => {
+    const unsub = subscribeAiConfig((cfg) => setAiConfig(cfg));
+    return () => unsub();
+  }, []);
+
+  const activeExtractLevel =
+    creatorRole === 'admin' ? aiConfig.adminLevel : aiConfig.teacherLevel;
 
   const stopCamera = () => {
     if (streamRef.current) {
@@ -230,6 +247,8 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
           instruction: aiInstruction.trim(),
           targetClass,
           subject,
+          thinkingLevel: activeExtractLevel,
+          callerRole: creatorRole,
         }),
       });
 
@@ -742,6 +761,56 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
                   placeholder="Example: Question 1, 3, 5 aur 7 lena hai  (or: Page 1 ke Q2, Q4 aur Page 2 ka Q8 nikalo)"
                   className="w-full rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-900 focus:border-blue-900 focus:outline-none"
                 />
+              </div>
+
+              <div className="rounded-xl border border-blue-200 bg-white px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <span className="text-slate-700 font-medium">
+                  Active AI Mode:{' '}
+                  <strong className="text-blue-900">
+                    {getAiLevelOption(activeExtractLevel).engineLabel}
+                  </strong>
+                </span>
+                {creatorRole === 'admin' ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      aria-label="Admin Book Extraction Thinking Level"
+                      disabled={updatingAiLevel}
+                      value={activeExtractLevel}
+                      onChange={(e) => {
+                        const val = e.target.value as AiThinkingPreset;
+                        setUpdatingAiLevel(true);
+                        void saveAiConfig(creatorUid, {
+                          ...aiConfig,
+                          adminLevel: val,
+                        }).finally(() => setUpdatingAiLevel(false));
+                      }}
+                      className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-900"
+                    >
+                      {AI_THINKING_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.shortLabel}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={updatingAiLevel}
+                      onClick={() => {
+                        setUpdatingAiLevel(true);
+                        void saveAiConfig(creatorUid, {
+                          studentLevel: activeExtractLevel,
+                          teacherLevel: activeExtractLevel,
+                          adminLevel: activeExtractLevel,
+                        }).finally(() => setUpdatingAiLevel(false));
+                      }}
+                      className="rounded-lg bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-slate-800 cursor-pointer disabled:opacity-60"
+                    >
+                      Sab Par Lagao (S+T+A)
+                    </button>
+                  </div>
+                ) : (
+                  <span className="text-[11px] text-slate-500">Controlled by Admin</span>
+                )}
               </div>
 
               {extractError && (

@@ -22,6 +22,8 @@ import {
   Mail,
   Plus,
   RefreshCw,
+  Sliders,
+  Sparkles,
   Trash2,
   UserPlus,
   Users,
@@ -37,11 +39,19 @@ import {
   signOutUser,
 } from '../firebase';
 import type {
+  AiThinkingPreset,
   ExamTest,
   StudentProfile,
   SubmissionReport,
   TeacherRecord,
 } from '../types';
+import {
+  AI_THINKING_OPTIONS,
+  DEFAULT_AI_CONFIG,
+  getAiLevelOption,
+  saveAiConfig,
+  subscribeAiConfig,
+} from '../utils/aiConfig';
 import {
   CLASS_OPTIONS,
   SUBJECT_OPTIONS,
@@ -123,6 +133,14 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
     confirmLabel: string;
     run: () => Promise<void>;
   } | null>(null);
+
+  // Global AI Thinking Level Settings (Student + Teacher + Admin)
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [studentAiLevel, setStudentAiLevel] = useState<AiThinkingPreset>(DEFAULT_AI_CONFIG.studentLevel);
+  const [teacherAiLevel, setTeacherAiLevel] = useState<AiThinkingPreset>(DEFAULT_AI_CONFIG.teacherLevel);
+  const [adminAiLevel, setAdminAiLevel] = useState<AiThinkingPreset>(DEFAULT_AI_CONFIG.adminLevel);
+  const [savingAiConfig, setSavingAiConfig] = useState(false);
+  const [aiConfigNotice, setAiConfigNotice] = useState('');
 
   useEffect(() => {
     if (!activeAdminUid) return;
@@ -216,6 +234,41 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       void loadAllAdminData();
     }
   }, [adminUnlocked, activeAdminUid]);
+
+  useEffect(() => {
+    if (!adminUnlocked || !activeAdminUid) return;
+    const unsub = subscribeAiConfig((cfg) => {
+      setStudentAiLevel(cfg.studentLevel);
+      setTeacherAiLevel(cfg.teacherLevel);
+      setAdminAiLevel(cfg.adminLevel);
+    });
+    return () => unsub();
+  }, [adminUnlocked, activeAdminUid]);
+
+  const handleApplyAiConfig = async (next: {
+    studentLevel: AiThinkingPreset;
+    teacherLevel: AiThinkingPreset;
+    adminLevel: AiThinkingPreset;
+  }) => {
+    if (!activeAdminUid) return;
+    setSavingAiConfig(true);
+    setAiConfigNotice('');
+    try {
+      await saveAiConfig(activeAdminUid, next);
+      setStudentAiLevel(next.studentLevel);
+      setTeacherAiLevel(next.teacherLevel);
+      setAdminAiLevel(next.adminLevel);
+      setAiConfigNotice(
+        `Saved! Student (${next.studentLevel}), Teacher (${next.teacherLevel}), Admin (${next.adminLevel}) ab turant sabhi devices par active hain.`
+      );
+    } catch (err) {
+      setAiConfigNotice(
+        err instanceof Error ? `Save failed: ${err.message}` : 'Unable to save AI settings.'
+      );
+    } finally {
+      setSavingAiConfig(false);
+    }
+  };
 
   const ensureAdminSessionDoc = async (activeUser: User, adminProof: string) => {
     const adminRef = doc(db, 'admins', activeUser.uid);
@@ -703,7 +756,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
             <span>{submissions.length} Checked Copies</span>
           </div>
         </div>
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => setAiPanelOpen((prev) => !prev)}
+            className={`inline-flex items-center gap-2 rounded-xl px-3.5 py-2.5 text-xs font-semibold cursor-pointer min-h-[44px] transition-colors ${
+              aiPanelOpen
+                ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                : 'bg-white/10 text-white hover:bg-white/20'
+            }`}
+          >
+            <Sliders className="w-4 h-4" />
+            AI Level: S:{studentAiLevel} · T:{teacherAiLevel} · A:{adminAiLevel}
+          </button>
           <button
             type="button"
             onClick={() => void loadAllAdminData()}
@@ -723,6 +788,160 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           </button>
         </div>
       </div>
+
+      {/* Global AI Thinking Level Controller (Visible right here across ALL tabs) */}
+      {aiPanelOpen && (
+        <div className="bg-white border-2 border-blue-200 rounded-2xl p-5 space-y-4 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-200">
+            <div className="flex items-start gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-blue-900 text-white flex items-center justify-center shrink-0">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  AI Thinking Level Control (Student · Teacher · Admin)
+                </h3>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Yahan se jo bhi level set karenge, woh Student Copy Checking, Teacher Book Photo Extraction, aur Admin tools teeno par live kaam karega.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAiPanelOpen(false)}
+              className="text-xs font-semibold text-slate-500 hover:text-slate-900 cursor-pointer self-start sm:self-center"
+            >
+              Close
+            </button>
+          </div>
+
+          {/* Quick Master Preset: Apply to All 3 Portals at once */}
+          <div>
+            <div className="text-xs font-bold text-slate-700 mb-2">
+              1-Click Preset (Teeno par ek saath lagayen: Student + Teacher + Admin)
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {AI_THINKING_OPTIONS.map((opt) => {
+                const isAllActive =
+                  studentAiLevel === opt.value &&
+                  teacherAiLevel === opt.value &&
+                  adminAiLevel === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    disabled={savingAiConfig}
+                    onClick={() =>
+                      void handleApplyAiConfig({
+                        studentLevel: opt.value,
+                        teacherLevel: opt.value,
+                        adminLevel: opt.value,
+                      })
+                    }
+                    className={`rounded-xl border px-3.5 py-2 text-xs font-semibold transition-colors cursor-pointer disabled:opacity-60 ${
+                      isAllActive
+                        ? 'bg-blue-900 text-white border-blue-900'
+                        : 'bg-slate-50 text-slate-800 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    {opt.shortLabel}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Individual Role Selectors */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 border-t border-slate-100">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Student Portal (Copy Check)
+              </label>
+              <select
+                value={studentAiLevel}
+                onChange={(e) => setStudentAiLevel(e.target.value as AiThinkingPreset)}
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold text-slate-900 focus:border-blue-900 focus:outline-none min-h-[42px]"
+              >
+                {AI_THINKING_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.shortLabel}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Engine: {getAiLevelOption(studentAiLevel).engineLabel}
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Teacher Portal (Book Photo Questions)
+              </label>
+              <select
+                value={teacherAiLevel}
+                onChange={(e) => setTeacherAiLevel(e.target.value as AiThinkingPreset)}
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold text-slate-900 focus:border-blue-900 focus:outline-none min-h-[42px]"
+              >
+                {AI_THINKING_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.shortLabel}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Engine: {getAiLevelOption(teacherAiLevel).engineLabel}
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Admin Portal (Book Photo &amp; Tools)
+              </label>
+              <select
+                value={adminAiLevel}
+                onChange={(e) => setAdminAiLevel(e.target.value as AiThinkingPreset)}
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold text-slate-900 focus:border-blue-900 focus:outline-none min-h-[42px]"
+              >
+                {AI_THINKING_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.shortLabel}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Engine: {getAiLevelOption(adminAiLevel).engineLabel}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+            <div className="text-xs text-slate-600">
+              {aiConfigNotice ? (
+                <span className="font-semibold text-emerald-700">{aiConfigNotice}</span>
+              ) : (
+                <span>
+                  Note: LOW/MEDIUM/HIGH/XHIGH Gemini 4 Hydrogen par chalte hain; MINIMAL automatically Flash Lite use karta hai taaki kabhi error na aaye.
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              disabled={savingAiConfig}
+              onClick={() =>
+                void handleApplyAiConfig({
+                  studentLevel: studentAiLevel,
+                  teacherLevel: teacherAiLevel,
+                  adminLevel: adminAiLevel,
+                })
+              }
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-900 px-5 py-2.5 text-xs font-bold text-white hover:bg-blue-800 cursor-pointer disabled:opacity-60 shrink-0 min-h-[42px]"
+            >
+              {savingAiConfig && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              Save AI Settings
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Navigation Tabs */}
       <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-xl w-full sm:w-fit overflow-x-auto">

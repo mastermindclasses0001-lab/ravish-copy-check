@@ -34,7 +34,8 @@ import {
   OperationType,
   signInWithGoogle,
 } from '../firebase';
-import type { ExamTest, StudentProfile, SubmissionReport } from '../types';
+import type { AppAiConfig, ExamTest, StudentProfile, SubmissionReport } from '../types';
+import { DEFAULT_AI_CONFIG, subscribeAiConfig } from '../utils/aiConfig';
 import {
   CLASS_OPTIONS,
   formatDateTimeReadable,
@@ -120,6 +121,12 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
 
   // Report modal
   const [viewingReport, setViewingReport] = useState<SubmissionReport | null>(null);
+  const [aiConfig, setAiConfig] = useState<AppAiConfig>(DEFAULT_AI_CONFIG);
+
+  useEffect(() => {
+    const unsub = subscribeAiConfig((cfg) => setAiConfig(cfg));
+    return () => unsub();
+  }, []);
 
   // Load saved progress from localStorage
   useEffect(() => {
@@ -700,6 +707,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
             questions: selectedTest.questions,
             encryptedAnswerKey: selectedTest.encryptedAnswerKey,
             pages: capturedPages,
+            thinkingLevel: aiConfig.studentLevel,
           }),
         });
       } catch (fetchErr) {

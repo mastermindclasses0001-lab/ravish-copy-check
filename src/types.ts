@@ -128,3 +128,15 @@ export interface TestTopper {
   expiresAtMs: number;
   updatedAt?: unknown;
 }
+
+export type AiThinkingPreset = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH';
+
+export interface AppAiConfig {
+  settingId: 'aiConfig';
+  studentLevel: AiThinkingPreset;
+  teacherLevel: AiThinkingPreset;
+  adminLevel: AiThinkingPreset;
+  updatedByUid?: string;
+  updatedAt?: unknown;
+}
+

@@ -235,6 +235,17 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidAppAiConfig(data) {
+      return data.keys().hasAll(['settingId', 'studentLevel', 'teacherLevel', 'adminLevel', 'updatedByUid', 'updatedAt'])
+        && data.keys().hasOnly(['settingId', 'studentLevel', 'teacherLevel', 'adminLevel', 'updatedByUid', 'updatedAt'])
+        && data.settingId == 'aiConfig'
+        && data.studentLevel is string && data.studentLevel in ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'XHIGH']
+        && data.teacherLevel is string && data.teacherLevel in ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'XHIGH']
+        && data.adminLevel is string && data.adminLevel in ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH', 'XHIGH']
+        && data.updatedByUid is string && data.updatedByUid.size() <= 128
+        && data.updatedAt is timestamp;
+    }
+
     // --- Collection Rules ---
 
     // 1. Students (PII isolated to owner & admin; mandatory verified selfie on profile)
@@ -463,6 +474,26 @@ service cloud.firestore {
           )
         );
       allow delete: if isValidId(testId) && isAdmin();
+    }
+
+    // 9. Global AI Thinking Settings (Admin-configured, readable by all portals)
+    match /appSettings/{settingId} {
+      allow get: if isValidId(settingId) && settingId == 'aiConfig';
+      allow list: if isAdmin();
+      allow create: if isValidId(settingId)
+        && settingId == 'aiConfig'
+        && isAdmin()
+        && isValidAppAiConfig(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId)
+        && settingId == 'aiConfig'
+        && isAdmin()
+        && isValidAppAiConfig(incoming())
+        && incoming().settingId == existing().settingId
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(settingId) && isAdmin();
     }
   }
 }

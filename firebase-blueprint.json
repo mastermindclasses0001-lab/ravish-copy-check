@@ -201,6 +201,20 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["pageIndex", "imageDataUrl", "createdAt"]
+    },
+    "AppAiConfig": {
+      "title": "Global AI Thinking Configuration",
+      "description": "Admin-controlled AI thinking levels applied across Student, Teacher, and Admin portals.",
+      "type": "object",
+      "properties": {
+        "settingId": { "type": "string", "enum": ["aiConfig"] },
+        "studentLevel": { "type": "string", "enum": ["MINIMAL", "LOW", "MEDIUM", "HIGH", "XHIGH"] },
+        "teacherLevel": { "type": "string", "enum": ["MINIMAL", "LOW", "MEDIUM", "HIGH", "XHIGH"] },
+        "adminLevel": { "type": "string", "enum": ["MINIMAL", "LOW", "MEDIUM", "HIGH", "XHIGH"] },
+        "updatedByUid": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["settingId", "studentLevel", "teacherLevel", "adminLevel", "updatedByUid", "updatedAt"]
     }
   },
   "firestore": {
@@ -243,6 +257,10 @@
     "/testToppers/{testId}": {
       "schema": { "$ref": "#/entities/TestTopper" },
       "description": "PII-free public Rank #1 topper showcase per test (12-hour window)."
+    },
+    "/appSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppAiConfig" },
+      "description": "Global Admin-managed AI thinking configuration for Student, Teacher, and Admin portals."
     }
   }
 }

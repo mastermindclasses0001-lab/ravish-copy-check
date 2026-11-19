@@ -134,6 +134,76 @@ function createGenAIClient(): GoogleGenAI {
   });
 }
 
+type AiThinkingPreset = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH';
+
+const serverAiConfig: {
+  studentLevel: AiThinkingPreset;
+  teacherLevel: AiThinkingPreset;
+  adminLevel: AiThinkingPreset;
+} = {
+  studentLevel: 'LOW',
+  teacherLevel: 'LOW',
+  adminLevel: 'LOW',
+};
+
+function normalizeThinkingPreset(
+  val: unknown,
+  fallback: AiThinkingPreset = 'LOW'
+): AiThinkingPreset {
+  const upper = typeof val === 'string' ? val.trim().toUpperCase() : '';
+  if (
+    upper === 'MINIMAL' ||
+    upper === 'LOW' ||
+    upper === 'MEDIUM' ||
+    upper === 'HIGH' ||
+    upper === 'XHIGH'
+  ) {
+    return upper;
+  }
+  return fallback;
+}
+
+function resolveAiThinkingTarget(preset: AiThinkingPreset): {
+  model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+  thinkingLevel: ThinkingLevel;
+  label: string;
+} {
+  switch (preset) {
+    case 'MINIMAL':
+      // Per @google/genai SDK rules, ThinkingLevel.MINIMAL is supported on gemini-3.1-flash-lite (returns 400 on gemini-4-hydrogen)
+      return {
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: ThinkingLevel.MINIMAL,
+        label: 'Gemini 3.1 Flash Lite (MINIMAL)',
+      };
+    case 'MEDIUM':
+      return {
+        model: 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel.MEDIUM,
+        label: 'Gemini 4 Hydrogen (MEDIUM)',
+      };
+    case 'HIGH':
+      return {
+        model: 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel.HIGH,
+        label: 'Gemini 4 Hydrogen (HIGH)',
+      };
+    case 'XHIGH':
+      return {
+        model: 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel.XHIGH,
+        label: 'Gemini 4 Hydrogen (XHIGH)',
+      };
+    case 'LOW':
+    default:
+      return {
+        model: 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel.LOW,
+        label: 'Gemini 4 Hydrogen (LOW)',
+      };
+  }
+}
+
 function stripWrappingQuotes(val: string): string {
   return val.trim().replace(/^["']|["']$/g, '').trim();
 }
@@ -792,6 +862,31 @@ async function startServer() {
     res.json({ ok: true, service: 'safal-academy-live' });
   });
 
+  app.get('/api/ai-config', (_req, res) => {
+    res.json(serverAiConfig);
+  });
+
+  app.post('/api/admin/ai-config', (req, res) => {
+    const body = req.body as {
+      studentLevel?: unknown;
+      teacherLevel?: unknown;
+      adminLevel?: unknown;
+    };
+    serverAiConfig.studentLevel = normalizeThinkingPreset(
+      body?.studentLevel,
+      serverAiConfig.studentLevel
+    );
+    serverAiConfig.teacherLevel = normalizeThinkingPreset(
+      body?.teacherLevel,
+      serverAiConfig.teacherLevel
+    );
+    serverAiConfig.adminLevel = normalizeThinkingPreset(
+      body?.adminLevel,
+      serverAiConfig.adminLevel
+    );
+    res.json({ ok: true, config: serverAiConfig });
+  });
+
   app.get('/api/email-status', async (_req, res) => {
     const queue = loadEmailQueue();
     const status = await verifySmtpLive(false);
@@ -1006,6 +1101,7 @@ Return JSON matching the exact schema:
         questions: QuestionItem[];
         encryptedAnswerKey: string;
         pages: string[];
+        thinkingLevel?: string;
       };
 
       if (!body.pages || !Array.isArray(body.pages) || body.pages.length === 0 || body.pages.length > 20) {
@@ -1021,6 +1117,9 @@ Return JSON matching the exact schema:
         return;
       }
 
+      const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
+      const aiTarget = resolveAiThinkingTarget(aiPreset);
+
       if (wantsStream) {
         res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
         res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1029,7 +1128,7 @@ Return JSON matching the exact schema:
         res.flushHeaders?.();
         sendSse({
           type: 'stage',
-          message: `Received ${body.pages.length} page(s) — Gemini 4 Hydrogen reading handwriting...`,
+          message: `Received ${body.pages.length} page(s) — ${aiTarget.label} reading handwriting...`,
         });
       }
 
@@ -1072,7 +1171,7 @@ Rules (be concise and accurate so evaluation is fast):
 7. Return JSON matching schema.`;
 
       const schemaConfig = {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+        thinkingConfig: { thinkingLevel: aiTarget.thinkingLevel },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -1122,7 +1221,7 @@ Rules (be concise and accurate so evaluation is fast):
               let rawText = '';
               let lastProgressAt = Date.now();
               const stream = await ai.models.generateContentStream({
-                model: 'gemini-4-hydrogen',
+                model: aiTarget.model,
                 contents: {
                   parts: [...imageParts, { text: promptText }],
                 },
@@ -1136,7 +1235,7 @@ Rules (be concise and accurate so evaluation is fast):
                     lastProgressAt = Date.now();
                     sendSse({
                       type: 'stage',
-                      message: `Gemini 4 Hydrogen grading ${body.pages.length} page(s)...`,
+                      message: `${aiTarget.label} grading ${body.pages.length} page(s)...`,
                     });
                   }
                 }
@@ -1144,7 +1243,7 @@ Rules (be concise and accurate so evaluation is fast):
               parsed = JSON.parse((rawText || '{}').trim());
             } else {
               const response = await ai.models.generateContent({
-                model: 'gemini-4-hydrogen',
+                model: aiTarget.model,
                 contents: {
                   parts: [...imageParts, { text: promptText }],
                 },
@@ -1293,6 +1392,8 @@ Rules (be concise and accurate so evaluation is fast):
         instruction?: string;
         targetClass?: string;
         subject?: string;
+        thinkingLevel?: string;
+        callerRole?: 'admin' | 'teacher';
       };
 
       if (!body.images || !Array.isArray(body.images) || body.images.length === 0 || body.images.length > 5) {
@@ -1303,6 +1404,11 @@ Rules (be concise and accurate so evaluation is fast):
         res.status(400).json({ error: 'Please tell AI which question numbers to select from the photos.' });
         return;
       }
+
+      const fallbackLevel =
+        body.callerRole === 'admin' ? serverAiConfig.adminLevel : serverAiConfig.teacherLevel;
+      const aiPreset = normalizeThinkingPreset(body.thinkingLevel, fallbackLevel);
+      const aiTarget = resolveAiThinkingTarget(aiPreset);
 
       const ai = createGenAIClient();
       const imageParts = body.images.map((dataUrl) => {
@@ -1344,12 +1450,12 @@ Instructions:
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const response = await ai.models.generateContent({
-            model: 'gemini-4-hydrogen',
+            model: aiTarget.model,
             contents: {
               parts: [...imageParts, { text: promptText }],
             },
             config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+              thinkingConfig: { thinkingLevel: aiTarget.thinkingLevel },
               responseMimeType: 'application/json',
               responseSchema: {
                 type: Type.OBJECT,
