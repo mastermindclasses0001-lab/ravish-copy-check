@@ -37,7 +37,8 @@ interface TeacherPortalProps {
   user: User | null;
 }
 
-export const TeacherPortal: React.FC<TeacherPortalProps> = ({ user }) => {
+export const TeacherPortal: React.FC<TeacherPortalProps> = ({ user: rawUser }) => {
+  const user = rawUser && !rawUser.isAnonymous ? rawUser : null;
   const [session, setSession] = useState<TeacherSession | null>(null);
   const [checkingSession, setCheckingSession] = useState(false);
 

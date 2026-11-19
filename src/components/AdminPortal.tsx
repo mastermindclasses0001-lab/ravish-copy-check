@@ -4,6 +4,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   serverTimestamp,
   setDoc,
@@ -26,11 +27,14 @@ import {
   Users,
 } from 'lucide-react';
 import {
+  auth,
   db,
   handleFirestoreError,
   OperationType,
   sha256Hex,
+  signInAnonymouslyUser,
   signInWithGoogle,
+  signOutUser,
 } from '../firebase';
 import type {
   ExamTest,
@@ -64,7 +68,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [anonDisabledNotice, setAnonDisabledNotice] = useState(false);
   const [verifying, setVerifying] = useState(false);
+
+  const activeAdminUid = user?.uid || auth.currentUser?.uid || '';
 
   const [activeTab, setActiveTab] = useState<'results' | 'create' | 'manage_tests' | 'teachers' | 'students'>('results');
 
@@ -118,17 +125,38 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
   } | null>(null);
 
   useEffect(() => {
+    if (!activeAdminUid) return;
+    let cancelled = false;
     try {
-      if (sessionStorage.getItem(ADMIN_SESSION_KEY) === 'true' && user) {
-        setAdminUnlocked(true);
+      if (sessionStorage.getItem(ADMIN_SESSION_KEY) === 'true') {
+        if ((user?.email || auth.currentUser?.email) === 'mastermindclasses0001@gmail.com') {
+          setAdminUnlocked(true);
+          return;
+        }
+        void getDoc(doc(db, 'admins', activeAdminUid))
+          .then((snap) => {
+            if (cancelled) return;
+            if (snap.exists()) {
+              setAdminUnlocked(true);
+            } else {
+              sessionStorage.removeItem(ADMIN_SESSION_KEY);
+              setAdminUnlocked(false);
+            }
+          })
+          .catch(() => {
+            if (!cancelled) setAdminUnlocked(false);
+          });
       }
     } catch {
       // ignore
     }
-  }, [user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAdminUid, user]);
 
   const loadAllAdminData = async () => {
-    if (!user) return;
+    if (!activeAdminUid) return;
     setLoadingAll(true);
     try {
       const [testsSnap, subsSnap, teachersSnap, studentsSnap] = await Promise.all([
@@ -184,14 +212,38 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
   };
 
   useEffect(() => {
-    if (adminUnlocked && user) {
+    if (adminUnlocked && activeAdminUid) {
       void loadAllAdminData();
     }
-  }, [adminUnlocked, user]);
+  }, [adminUnlocked, activeAdminUid]);
+
+  const ensureAdminSessionDoc = async (activeUser: User, adminProof: string) => {
+    const adminRef = doc(db, 'admins', activeUser.uid);
+    let existing = false;
+    try {
+      const snap = await getDoc(adminRef);
+      existing = snap.exists();
+    } catch {
+      existing = false;
+    }
+    if (!existing) {
+      try {
+        await setDoc(adminRef, {
+          uid: activeUser.uid,
+          email: activeUser.email || 'admin-passcode@safalacademy.local',
+          passcodeHash: adminProof,
+          createdAt: serverTimestamp(),
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, `admins/${activeUser.uid}`);
+      }
+    }
+  };
 
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
+    setAnonDisabledNotice(false);
     const trimmedPass = passwordInput.trim();
     if (!trimmedPass) {
       setLoginError('Please enter your Admin passcode.');
@@ -200,21 +252,42 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
 
     setVerifying(true);
     try {
-      let activeUser = user;
-      if (!activeUser) {
-        activeUser = await signInWithGoogle();
-      }
-
       const resp = await fetch('/api/auth/admin-verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: trimmedPass }),
       });
-      const data = await parseJsonResponse<{ verified?: boolean; error?: string }>(resp);
-      if (!resp.ok || !data.verified) {
+      const data = await parseJsonResponse<{
+        verified?: boolean;
+        adminProof?: string;
+        error?: string;
+      }>(resp);
+      if (!resp.ok || !data.verified || !data.adminProof) {
         setLoginError(data.error || 'Incorrect Admin password.');
         return;
       }
+
+      let activeUser = auth.currentUser || user;
+      if (!activeUser) {
+        try {
+          activeUser = await signInAnonymouslyUser();
+        } catch (authErr) {
+          const code = (authErr as { code?: string })?.code || '';
+          if (
+            code === 'auth/operation-not-allowed' ||
+            code === 'auth/admin-restricted-operation'
+          ) {
+            setAnonDisabledNotice(true);
+            setLoginError(
+              'Firebase Console me Anonymous Login ek baar enable karna zaroori hai taaki bina email ke kisi bhi device se sirf 525077 se login ho sake.'
+            );
+            return;
+          }
+          throw authErr;
+        }
+      }
+
+      await ensureAdminSessionDoc(activeUser, data.adminProof);
 
       sessionStorage.setItem(ADMIN_SESSION_KEY, 'true');
       setAdminUnlocked(true);
@@ -226,14 +299,61 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
     }
   };
 
-  const handleAdminLogout = () => {
+  const handleGoogleAdminFallback = async () => {
+    setLoginError('');
+    const trimmedPass = passwordInput.trim();
+    if (!trimmedPass) {
+      setLoginError('Pahle upar 6-digit Admin Passcode daalen.');
+      return;
+    }
+
+    setVerifying(true);
+    try {
+      const resp = await fetch('/api/auth/admin-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: trimmedPass }),
+      });
+      const data = await parseJsonResponse<{
+        verified?: boolean;
+        adminProof?: string;
+        error?: string;
+      }>(resp);
+      if (!resp.ok || !data.verified || !data.adminProof) {
+        setLoginError(data.error || 'Incorrect Admin password.');
+        return;
+      }
+
+      const activeUser = await signInWithGoogle();
+      await ensureAdminSessionDoc(activeUser, data.adminProof);
+
+      sessionStorage.setItem(ADMIN_SESSION_KEY, 'true');
+      setAnonDisabledNotice(false);
+      setAdminUnlocked(true);
+      setPasswordInput('');
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Admin authentication failed.');
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const handleAdminLogout = async () => {
+    const uidToClear = activeAdminUid;
+    const isAnon = Boolean(auth.currentUser?.isAnonymous);
     sessionStorage.removeItem(ADMIN_SESSION_KEY);
     setAdminUnlocked(false);
+    if (uidToClear) {
+      await deleteDoc(doc(db, 'admins', uidToClear)).catch(() => {});
+    }
+    if (isAnon) {
+      await signOutUser().catch(() => {});
+    }
   };
 
   const handleAddTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) return;
+    if (!activeAdminUid) return;
     setTeacherFormError('');
     setTeacherCreatedNotice(null);
 
@@ -266,7 +386,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
         subject: teacherSubject,
         authKeyHash,
         active: true,
-        createdBy: user.uid,
+        createdBy: activeAdminUid,
       };
 
       try {
@@ -501,7 +621,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
     }
   };
 
-  if (!adminUnlocked || !user) {
+  if (!adminUnlocked || !activeAdminUid) {
     return (
       <div className="max-w-md mx-auto">
         <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-xs">
@@ -510,12 +630,27 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           </div>
           <h2 className="text-2xl font-bold text-slate-900">Admin Login</h2>
           <p className="text-sm text-slate-600 mt-1">
-            Enter your fixed Admin passcode to manage teachers, students, tests, and final rankings.
+            Sirf apna 6-digit Admin Passcode daalen — kisi bhi phone ya browser se bina email ke seedha unlock hoga.
           </p>
 
           {loginError && (
-            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-              {loginError}
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 space-y-2">
+              <p>{loginError}</p>
+              {anonDisabledNotice && (
+                <div className="text-xs text-red-900 bg-white/80 rounded-lg p-2.5 border border-red-200 space-y-1.5">
+                  <p className="font-semibold">
+                    10-Second Setup: Firebase Console → Authentication → Sign-in method → Anonymous → Enable karen.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleGoogleAdminFallback()}
+                    disabled={verifying}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
+                  >
+                    Abhi ke liye Google se Unlock karen (Optional)
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -535,19 +670,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
               />
             </div>
 
-            {!user && (
-              <p className="text-xs text-slate-500">
-                Sign in with your Admin Google account when prompted to access cloud records.
-              </p>
-            )}
-
             <button
               type="submit"
               disabled={verifying}
               className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-blue-900 py-3 px-6 text-sm font-semibold text-white hover:bg-blue-800 transition-colors cursor-pointer disabled:opacity-60 min-h-[48px]"
             >
               {verifying && <Loader2 className="w-4 h-4 animate-spin" />}
-              {verifying ? 'Verifying...' : 'Unlock Admin Control'}
+              {verifying ? 'Verifying Passcode...' : 'Unlock Admin Control'}
             </button>
           </form>
         </div>
@@ -586,7 +715,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           </button>
           <button
             type="button"
-            onClick={handleAdminLogout}
+            onClick={() => void handleAdminLogout()}
             className="inline-flex items-center gap-2 rounded-xl bg-white text-slate-900 px-4 py-2.5 text-xs font-semibold hover:bg-slate-100 cursor-pointer min-h-[44px]"
           >
             <LogOut className="w-4 h-4" />
@@ -904,7 +1033,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       {/* TAB 2: Create Test (Full Teacher Capability) */}
       {activeTab === 'create' && (
         <TestCreatorPanel
-          creatorUid={user.uid}
+          creatorUid={activeAdminUid}
           creatorName="Admin (Safal Academy Live)"
           creatorRole="admin"
           onTestCreated={(t) => setTests((prev) => [t, ...prev])}

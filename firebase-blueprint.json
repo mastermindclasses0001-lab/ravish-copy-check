@@ -66,11 +66,12 @@
     },
     "AdminRecord": {
       "title": "Admin Record",
-      "description": "Admin session document for multi-device administration.",
+      "description": "Admin session document for multi-device passcode or Google administration.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "maxLength": 160 },
+        "passcodeHash": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "createdAt"]

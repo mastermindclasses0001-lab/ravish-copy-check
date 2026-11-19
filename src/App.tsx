@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
-import { collection, getDocs, limit, query, where } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDocs, limit, query, where } from 'firebase/firestore';
 import {
   Award,
   BookOpenCheck,
@@ -56,7 +56,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!authReady || portal !== 'home') return;
+    void fetch('/api/health').catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (portal !== 'home') return;
     let cancelled = false;
     const loadToppers = async () => {
       try {
@@ -80,7 +84,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [authReady, portal]);
+  }, [portal]);
 
   const activeToppers = useMemo(() => {
     return toppers
@@ -89,6 +93,13 @@ export default function App() {
   }, [toppers, nowMs]);
 
   const handleGlobalSignOut = async () => {
+    try {
+      if (auth.currentUser && sessionStorage.getItem('safal_admin_verified_v1') === 'true') {
+        await deleteDoc(doc(db, 'admins', auth.currentUser.uid)).catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
     await signOutUser();
     try {
       sessionStorage.removeItem('safal_admin_verified_v1');
@@ -161,7 +172,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => void handleGlobalSignOut()}
-                  title={`Signed in as ${user.email}`}
+                  title={user.email ? `Signed in as ${user.email}` : 'Admin Passcode Session'}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer min-h-[40px]"
                 >
                   <LogOut className="w-3.5 h-3.5" />
@@ -174,7 +185,7 @@ export default function App() {
 
         {/* Main Viewport */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
-          {!authReady ? (
+          {portal !== 'home' && !authReady ? (
             <div className="py-20 text-center text-sm text-slate-500">
               Initializing Safal Academy Live...
             </div>

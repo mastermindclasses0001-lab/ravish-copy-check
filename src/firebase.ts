@@ -3,6 +3,7 @@ import {
   getAuth,
   getRedirectResult,
   GoogleAuthProvider,
+  signInAnonymously,
   signInWithPopup,
   signInWithRedirect,
   signOut,
@@ -96,6 +97,11 @@ export async function signInWithGoogle(): Promise<User> {
     }
     throw err;
   }
+}
+
+export async function signInAnonymouslyUser(): Promise<User> {
+  const result = await signInAnonymously(auth);
+  return result.user;
 }
 
 export async function signOutUser(): Promise<void> {

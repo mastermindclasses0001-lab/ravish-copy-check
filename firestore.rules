@@ -32,7 +32,7 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isEmailAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+      return isEmailAdmin() || (request.auth != null && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
     }
 
     function isTeacher() {
@@ -101,9 +101,10 @@ service cloud.firestore {
 
     function isValidAdminRecord(data) {
       return data.keys().hasAll(['uid', 'email', 'createdAt'])
-        && data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'passcodeHash', 'createdAt'])
         && data.uid is string && data.uid.size() <= 128
         && data.email is string && data.email.size() <= 160
+        && (!('passcodeHash' in data) || (data.passcodeHash is string && data.passcodeHash.size() == 64 && data.passcodeHash.matches('^[a-f0-9]{64}$')))
         && data.createdAt is timestamp;
     }
 
@@ -239,7 +240,7 @@ service cloud.firestore {
     // 1. Students (PII isolated to owner & admin; mandatory verified selfie on profile)
     match /students/{studentId} {
       allow get: if isValidId(studentId) && (isOwner(studentId) || isAdmin());
-      allow list: if isEmailAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
       allow create: if isValidId(studentId)
         && isOwner(studentId)
         && isValidStudent(incoming())
@@ -262,7 +263,7 @@ service cloud.firestore {
     // 2. Teachers (Managed strictly by Admin)
     match /teachers/{teacherId} {
       allow get: if isValidId(teacherId) && isAdmin();
-      allow list: if isEmailAdmin();
+      allow list: if isAdmin();
       allow create: if isValidId(teacherId)
         && isAdmin()
         && isValidTeacherRecord(incoming())
@@ -277,7 +278,7 @@ service cloud.firestore {
 
     // 3. Teacher Auth Lookup (SHA-256 keyed; zero list access)
     match /teacherAuth/{authKeyHash} {
-      allow get: if isSignedIn() && authKeyHash is string && authKeyHash.size() == 64;
+      allow get: if (isSignedIn() || isAdmin()) && authKeyHash is string && authKeyHash.size() == 64;
       allow list: if false;
       allow create: if isAdmin()
         && authKeyHash is string && authKeyHash.size() == 64
@@ -293,7 +294,7 @@ service cloud.firestore {
     // 4. Teacher Sessions (Verified against active teacherAuth)
     match /teacherSessions/{uid} {
       allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
-      allow list: if isEmailAdmin();
+      allow list: if isAdmin();
       allow create: if isValidId(uid)
         && isOwner(uid)
         && isValidTeacherSession(incoming())
@@ -313,22 +314,28 @@ service cloud.firestore {
       allow delete: if isValidId(uid) && (isOwner(uid) || isAdmin());
     }
 
-    // 5. Admins
+    // 5. Admins (Passcode-verified multi-device Admin sessions + primary email admin)
     match /admins/{uid} {
-      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
-      allow list: if isEmailAdmin();
+      allow get: if isValidId(uid) && ((request.auth != null && request.auth.uid == uid) || isAdmin());
+      allow list: if isAdmin();
       allow create: if isValidId(uid)
-        && isAdmin()
+        && request.auth != null
+        && request.auth.uid == uid
         && isValidAdminRecord(incoming())
-        && incoming().createdAt == request.time;
+        && incoming().uid == uid
+        && incoming().createdAt == request.time
+        && (
+          isEmailAdmin() ||
+          ('passcodeHash' in incoming() && incoming().passcodeHash == 'd3c31ec5aedfc3703f019c054ea3d18f6346d300577160f8ce3829edab955e23')
+        );
       allow update: if false;
-      allow delete: if isValidId(uid) && isAdmin();
+      allow delete: if isValidId(uid) && ((request.auth != null && request.auth.uid == uid) || isAdmin());
     }
 
-    // 6. Tests (Active tests readable by signed-in users; ideal answers encrypted)
+    // 6. Tests (Active tests readable by signed-in users & admins; ideal answers encrypted)
     match /tests/{testId} {
-      allow get: if isValidId(testId) && isSignedIn();
-      allow list: if isSignedIn() && (resource.data.active == true || resource.data.createdByUid == request.auth.uid || isEmailAdmin());
+      allow get: if isValidId(testId) && (isSignedIn() || isAdmin());
+      allow list: if (isSignedIn() && (resource.data.active == true || resource.data.createdByUid == request.auth.uid)) || isAdmin();
       allow create: if isValidId(testId)
         && (isAdmin() || isTeacher())
         && isValidExamTest(incoming())
@@ -369,7 +376,7 @@ service cloud.firestore {
     // 7. Submissions & Graded Report Cards
     match /submissions/{submissionId} {
       allow get: if isValidId(submissionId) && (isAdmin() || isTeacher() || (isSignedIn() && existing().studentUid == request.auth.uid));
-      allow list: if isEmailAdmin() || (isSignedIn() && (resource.data.studentUid == request.auth.uid || resource.data.testCreatorUid == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && (resource.data.studentUid == request.auth.uid || resource.data.testCreatorUid == request.auth.uid));
       allow create: if isValidId(submissionId)
         && isSignedIn()
         && isValidSubmission(incoming())
@@ -400,7 +407,7 @@ service cloud.firestore {
             isTeacher() ||
             (isSignedIn() && get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid)
           );
-        allow list: if isEmailAdmin();
+        allow list: if isAdmin();
         allow create: if isValidId(submissionId) && isValidId(pageId)
           && isSignedIn()
           && isValidSubmissionPage(incoming())
@@ -417,7 +424,7 @@ service cloud.firestore {
       allow get: if isValidId(testId);
       allow list: if resource.data.expiresAtMs is int && resource.data.expiresAtMs > 0;
       allow create: if isValidId(testId)
-        && isSignedIn()
+        && (isSignedIn() || isAdmin())
         && isValidTestTopper(incoming())
         && incoming().testId == testId
         && incoming().updatedAt == request.time
@@ -428,7 +435,7 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.studentUid == incoming().studentUid
         && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.obtainedMarks == incoming().obtainedMarks;
       allow update: if isValidId(testId)
-        && isSignedIn()
+        && (isSignedIn() || isAdmin())
         && isValidTestTopper(incoming())
         && incoming().testId == existing().testId
         && incoming().updatedAt == request.time

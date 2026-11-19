@@ -7,6 +7,7 @@
 4. **Submission Ownership & Integrity**: A student can only create a submission at `/submissions/{submissionId}` where `studentUid == request.auth.uid`, `testId` exists in `/tests/{testId}`, `pageCount` is between 1 and 20, and `obtainedMarks <= totalMarks`.
 5. **Immutable Audit Fields & Server Timestamps**: `createdAt`, `studentUid`, `testId`, and `createdByUid` are immutable after creation; `createdAt == request.time` on create and `updatedAt == request.time` on update.
 6. **Public 12-Hour Toppers Showcase (`/testToppers/{testId}`)**: Contains zero PII (only display name, class, photo, test metadata, marks, percentage, and 12-hour `expiresAtMs <= request.time + 12h`), verified via `get()` against `/submissions/{submissionId}` so students cannot spoof scores or overwrite higher toppers.
+7. **Passcode-Only Multi-Device Admin Gate (`/admins/{uid}`)**: Admin can unlock from any device using the server-verified passcode proof hash (`passcodeHash`) on an authenticated Firebase session (including silent Anonymous UID without requiring Google Email), while `isSignedIn()` remains strictly `email_verified == true` for Student/Teacher operations.
 
 ## 2. The "Dirty Dozen" Adversarial Payloads (Must Return PERMISSION_DENIED)
 1. **Unauthenticated Student Profile Create**: Missing `request.auth` on `/students/abc`.

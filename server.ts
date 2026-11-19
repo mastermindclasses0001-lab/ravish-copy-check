@@ -832,7 +832,12 @@ async function startServer() {
       res.status(401).json({ verified: false, error: 'Incorrect Admin password.' });
       return;
     }
-    res.json({ verified: true });
+    const proofSecret = process.env.ADMIN_FIRESTORE_PROOF || '525077';
+    const adminProof = crypto
+      .createHash('sha256')
+      .update(`safal_admin_gate:${proofSecret}`)
+      .digest('hex');
+    res.json({ verified: true, adminProof });
   });
 
   app.post('/api/tests/encrypt-key', (req, res) => {
@@ -1067,7 +1072,7 @@ Rules (be concise and accurate so evaluation is fast):
 7. Return JSON matching schema.`;
 
       const schemaConfig = {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -1344,7 +1349,7 @@ Instructions:
               parts: [...imageParts, { text: promptText }],
             },
             config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
               responseMimeType: 'application/json',
               responseSchema: {
                 type: Type.OBJECT,
@@ -1422,8 +1427,13 @@ Instructions:
     const distDir = path.resolve(process.cwd(), 'dist');
     app.use(
       express.static(distDir, {
+        maxAge: '7d',
         setHeaders(res, filePath) {
-          if (filePath.endsWith('sw.js') || filePath.endsWith('manifest.webmanifest')) {
+          if (
+            filePath.endsWith('index.html') ||
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('manifest.webmanifest')
+          ) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
           }
         },

@@ -35,6 +35,8 @@ function encodeResizedCanvas(
 
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, width, height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(source, 0, 0, width, height);
 
   let out = canvas.toDataURL('image/jpeg', quality);
@@ -45,6 +47,66 @@ function encodeResizedCanvas(
     out = canvas.toDataURL('image/jpeg', 0.42);
   }
   return out;
+}
+
+export async function checkImageHasDetail(
+  dataUrl: string
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!dataUrl || !dataUrl.startsWith('data:image/') || dataUrl.length < 1500) {
+    return {
+      ok: false,
+      reason: 'Photo bahut chhota ya blank hai — kripya dubara selfie len.',
+    };
+  }
+  return await new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const size = 48;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ ok: true });
+          return;
+        }
+        ctx.drawImage(img, 0, 0, size, size);
+        const { data } = ctx.getImageData(0, 0, size, size);
+        let sum = 0;
+        let sumSq = 0;
+        const count = size * size;
+        for (let i = 0; i < data.length; i += 4) {
+          const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          sum += lum;
+          sumSq += lum * lum;
+        }
+        const mean = sum / count;
+        const variance = Math.max(0, sumSq / count - mean * mean);
+        const stdDev = Math.sqrt(variance);
+
+        if (mean < 14) {
+          resolve({
+            ok: false,
+            reason: 'Photo bilkul andhera (black) hai — thodi roshni me selfie len.',
+          });
+          return;
+        }
+        if (stdDev < 6) {
+          resolve({
+            ok: false,
+            reason: 'Camera dhaka hua ya bilkul blank photo hai — saaf selfie len.',
+          });
+          return;
+        }
+        resolve({ ok: true });
+      } catch {
+        resolve({ ok: true });
+      }
+    };
+    img.onerror = () => resolve({ ok: false, reason: 'Photo read nahi ho paya — dubara try karen.' });
+    img.src = dataUrl;
+  });
 }
 
 export function captureVideoFrameAsDataUrl(

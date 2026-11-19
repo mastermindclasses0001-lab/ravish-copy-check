@@ -47,6 +47,7 @@ import {
 } from '../utils/pdfGenerator';
 import {
   captureVideoFrameAsDataUrl,
+  checkImageHasDetail,
   compressImageFile,
   compressImageFilesInBatches,
 } from '../utils/imageCompress';
@@ -64,7 +65,8 @@ interface LocalExamProgress {
   downloadedAt?: string;
 }
 
-export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
+export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) => {
+  const user = rawUser && !rawUser.isAnonymous ? rawUser : null;
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
@@ -373,9 +375,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
   const captureFromVideo = () => {
     if (!videoRef.current || capturedPages.length >= 20) return;
     const compressed = captureVideoFrameAsDataUrl(videoRef.current, {
-      maxDim: 1000,
-      quality: 0.65,
-      maxChars: 165_000,
+      maxDim: 900,
+      quality: 0.62,
+      maxChars: 115_000,
     });
     if (compressed) {
       setCapturedPages((prev) => [...prev.slice(0, 19), compressed]);
@@ -395,9 +397,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
       const valid = await compressImageFilesInBatches(
         selected,
         {
-          maxDim: 1000,
-          quality: 0.65,
-          maxChars: 165_000,
+          maxDim: 900,
+          quality: 0.62,
+          maxChars: 115_000,
         },
         (done, total) => {
           setPhotoProgressText(`Optimizing Photos (${done}/${total})...`);
@@ -447,49 +449,27 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     }
   };
 
-  const verifySelfieWithAi = async (compressedDataUrl: string) => {
+  const acceptSimpleSelfie = async (compressedDataUrl: string) => {
     setSelfiePhotoUrl(compressedDataUrl);
     setSelfieVerified(false);
     setSelfieVerifiedAt('');
     setSelfieError('');
-    setSelfieStatusMsg('AI clear human face check kar raha hai...');
+    setSelfieStatusMsg('');
     setVerifyingSelfie(true);
 
     try {
-      const resp = await fetch('/api/verify-student-selfie', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageDataUrl: compressedDataUrl }),
-      });
-      const data = await parseJsonResponse<{
-        valid?: boolean;
-        faceCount?: number;
-        reason?: string;
-      }>(resp);
-
-      if (resp.ok && data.valid) {
+      const check = await checkImageHasDetail(compressedDataUrl);
+      if (check.ok) {
         setSelfieVerified(true);
         setSelfieVerifiedAt(new Date().toISOString());
-        setSelfieStatusMsg(data.reason || 'Clear human selfie verified!');
+        setSelfieStatusMsg('Selfie ready!');
         setSelfieError('');
       } else {
         setSelfieVerified(false);
         setSelfieVerifiedAt('');
         setSelfieStatusMsg('');
-        setSelfieError(
-          data.reason ||
-            'Faltu/unclear photo reject ho gaya. Roshni me seedhe dekh kar apna clear single human selfie len.'
-        );
+        setSelfieError(check.reason || 'Kripya roshni me apna saaf selfie len.');
       }
-    } catch (err) {
-      setSelfieVerified(false);
-      setSelfieVerifiedAt('');
-      setSelfieStatusMsg('');
-      setSelfieError(
-        err instanceof Error
-          ? `Selfie verify nahi ho paya: ${err.message}`
-          : 'Selfie verification fail ho gaya. Dubara try karen.'
-      );
     } finally {
       setVerifyingSelfie(false);
     }
@@ -504,7 +484,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
     });
     if (compressed) {
       stopSelfieCamera();
-      void verifySelfieWithAi(compressed);
+      void acceptSimpleSelfie(compressed);
     }
   };
 
@@ -521,7 +501,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
         maxChars: 90_000,
       });
       stopSelfieCamera();
-      await verifySelfieWithAi(compressed);
+      await acceptSimpleSelfie(compressed);
     } catch (err) {
       setSelfieError(
         err instanceof Error ? err.message : 'Photo process nahi ho paya. Dubara selfie len.'
@@ -859,10 +839,10 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
           )
         );
       }
-      await Promise.all(chunkCommits);
-
-      // Update public 12-hour Test Toppers showcase if this student is Rank #1
-      await syncTestTopperOnSubmit(submissionDoc, profile);
+      await Promise.all([
+        ...chunkCommits,
+        syncTestTopperOnSubmit(submissionDoc, profile),
+      ]);
 
       stopCamera();
       setSubmissions((prev) => [submissionDoc, ...prev.filter((s) => s.submissionId !== submissionId)]);
@@ -940,21 +920,21 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
           )}
 
           <form onSubmit={validateAndSaveProfile} className="mt-6 space-y-5">
-            {/* Mandatory Live Human Selfie Section */}
+            {/* Mandatory Simple Live Selfie Section */}
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    Mandatory Student Selfie (Clear Human Face Only) *
+                    Mandatory Student Selfie *
                   </h3>
                   <p className="text-xs text-slate-600 mt-0.5">
-                    Roshni me seedhe dekh kar apna saaf selfie len — faltu photo (diwar, copy, blind/dark frame ya cartoon) AI dwara reject ho jayega.
+                    Roshni me apna saaf selfie photo len — turant save ho jayega (bina kisi AI wait ke).
                   </p>
                 </div>
                 {selfieVerified && (
                   <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 shrink-0">
                     <UserCheck className="w-4 h-4" />
-                    Selfie Verified
+                    Selfie Ready
                   </span>
                 )}
               </div>
