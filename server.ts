@@ -62,8 +62,66 @@ interface EmailJobPayload {
 
 let isProcessingEmailQueue = false;
 
+let hydrogenQuotaBlockedUntil = 0;
+
+function getRawErrorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isQuotaOrRateLimitError(err: unknown): boolean {
+  const msg = getRawErrorText(err).toUpperCase();
+  return (
+    msg.includes('429') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('QUOTA') ||
+    msg.includes('TOO MANY REQUESTS')
+  );
+}
+
+function isDailyQuotaExhaustedError(err: unknown): boolean {
+  const msg = getRawErrorText(err).toUpperCase();
+  return (
+    msg.includes('PERDAY') ||
+    msg.includes('FREE_TIER') ||
+    msg.includes('FREETIER') ||
+    msg.includes('GENERATEREQUESTSPERDAY') ||
+    msg.includes('LIMIT: 20') ||
+    msg.includes('QUOTAVALUE')
+  );
+}
+
+function formatFriendlyGeminiError(err: unknown): string {
+  const raw = getRawErrorText(err);
+  const upper = raw.toUpperCase();
+  if (upper.includes('429') || upper.includes('RESOURCE_EXHAUSTED') || upper.includes('QUOTA')) {
+    return 'Aaj ka Free Gemini AI daily quota limit poora ho gaya hai (Free Tier par limit hoti hai). Kripya Admin Settings me "MINIMAL (Flash Lite)" chunen, thodi der baad try karen, ya Billing-enabled Gemini API Key use karen.';
+  }
+  if (upper.includes('API_KEY_INVALID') || upper.includes('API KEY NOT VALID') || upper.includes('PERMISSION_DENIED')) {
+    return 'Server par Gemini API Key invalid hai ya permission nahi hai. Settings > Secrets me API Key check karen.';
+  }
+  if (upper.includes('DEADLINE_EXCEEDED') || upper.includes('ETIMEDOUT') || upper.includes('TIMEOUT')) {
+    return 'AI server ko jawab dene me zyada samay laga. Kripya ek baar dubara Submit dabayen.';
+  }
+  // Extract readable inner message if Gemini returned nested JSON
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: string }; message?: string };
+    const inner = parsed?.error?.message || parsed?.message;
+    if (inner && typeof inner === 'string') {
+      try {
+        const innerJson = JSON.parse(inner) as { error?: { message?: string } };
+        if (innerJson?.error?.message) return innerJson.error.message.split('\n')[0];
+      } catch {
+        return inner.split('\n')[0];
+      }
+    }
+  } catch {
+    // not raw JSON
+  }
+  return raw.slice(0, 240);
+}
+
 function isRetryableGeminiError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toUpperCase();
+  const msg = getRawErrorText(err).toUpperCase();
   if (
     msg.includes('API_KEY_INVALID') ||
     msg.includes('API KEY NOT VALID') ||
@@ -75,6 +133,10 @@ function isRetryableGeminiError(err: unknown): boolean {
     msg.includes('403') ||
     msg.includes('404')
   ) {
+    return false;
+  }
+  // Do not spin retries on a hard daily free-tier cap; let fallback model run immediately
+  if (isDailyQuotaExhaustedError(err)) {
     return false;
   }
   return (
@@ -202,6 +264,35 @@ function resolveAiThinkingTarget(preset: AiThinkingPreset): {
         label: 'Gemini 4 Hydrogen (LOW)',
       };
   }
+}
+
+function buildAttemptTargets(primary: {
+  model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+  thinkingLevel: ThinkingLevel;
+  label: string;
+}) {
+  const flashLiteBackup = {
+    model: 'gemini-3.1-flash-lite' as const,
+    thinkingLevel: ThinkingLevel.MINIMAL,
+    label: 'Gemini 3.1 Flash Lite (High-Quota Backup)',
+  };
+  const hydrogenBackup = {
+    model: 'gemini-4-hydrogen' as const,
+    thinkingLevel: ThinkingLevel.LOW,
+    label: 'Gemini 4 Hydrogen (Backup)',
+  };
+
+  if (primary.model === 'gemini-4-hydrogen') {
+    if (Date.now() < hydrogenQuotaBlockedUntil) {
+      // Skip known-exhausted Hydrogen free tier for 15 mins so students never wait
+      return [flashLiteBackup];
+    }
+    return [primary, flashLiteBackup];
+  }
+  if (Date.now() < hydrogenQuotaBlockedUntil) {
+    return [primary];
+  }
+  return [primary, hydrogenBackup];
 }
 
 function stripWrappingQuotes(val: string): string {
@@ -1003,53 +1094,66 @@ Return JSON matching the exact schema:
         reason?: string;
       } | null = null;
 
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const response = await ai.models.generateContent({
-            model: 'gemini-4-hydrogen',
-            contents: {
-              parts: [
-                {
-                  inlineData: {
-                    mimeType,
-                    data: base64Data,
-                  },
-                },
-                { text: prompt },
-              ],
-            },
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  isValidHumanSelfie: { type: Type.BOOLEAN },
-                  faceCount: { type: Type.INTEGER },
-                  reason: { type: Type.STRING },
-                },
-                required: ['isValidHumanSelfie', 'faceCount', 'reason'],
-              },
-            },
-          });
+      const selfieTargets = buildAttemptTargets({
+        model: 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel.LOW,
+        label: 'Gemini 4 Hydrogen (LOW)',
+      });
 
-          const rawText = (response.text ?? '{}').trim();
-          parsed = JSON.parse(rawText);
-          break;
-        } catch (err) {
-          lastErr = err;
-          if (!isRetryableGeminiError(err) || attempt >= 2) {
+      for (const target of selfieTargets) {
+        if (parsed) break;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const response = await ai.models.generateContent({
+              model: target.model,
+              contents: {
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType,
+                      data: base64Data,
+                    },
+                  },
+                  { text: prompt },
+                ],
+              },
+              config: {
+                thinkingConfig: { thinkingLevel: target.thinkingLevel },
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    isValidHumanSelfie: { type: Type.BOOLEAN },
+                    faceCount: { type: Type.INTEGER },
+                    reason: { type: Type.STRING },
+                  },
+                  required: ['isValidHumanSelfie', 'faceCount', 'reason'],
+                },
+              },
+            });
+
+            const rawText = (response.text ?? '{}').trim();
+            parsed = JSON.parse(rawText);
             break;
+          } catch (err) {
+            lastErr = err;
+            if (target.model === 'gemini-4-hydrogen' && isDailyQuotaExhaustedError(err)) {
+              hydrogenQuotaBlockedUntil = Date.now() + 15 * 60_000;
+              break;
+            }
+            if (!isRetryableGeminiError(err) || attempt >= 1) {
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
           }
-          await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
         }
       }
 
       if (!parsed || typeof parsed.isValidHumanSelfie !== 'boolean') {
-        const msg = lastErr instanceof Error ? lastErr.message : 'Selfie verification failed.';
+        const msg = formatFriendlyGeminiError(lastErr);
         res.status(502).json({
           valid: false,
-          reason: `AI selfie verification fail ho gaya (${msg}). Please try again.`,
+          reason: `AI selfie verification fail ho gaya (${msg}).`,
         });
         return;
       }
@@ -1195,6 +1299,8 @@ Rules (be concise and accurate so evaluation is fast):
         },
       };
 
+      const aiTargets = buildAttemptTargets(aiTarget);
+
       let lastErr: unknown = null;
       let parsed: {
         questionReports: Array<{
@@ -1215,53 +1321,71 @@ Rules (be concise and accurate so evaluation is fast):
         : null;
 
       try {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            if (wantsStream) {
-              let rawText = '';
-              let lastProgressAt = Date.now();
-              const stream = await ai.models.generateContentStream({
-                model: aiTarget.model,
-                contents: {
-                  parts: [...imageParts, { text: promptText }],
-                },
-                config: schemaConfig,
-              });
-              for await (const chunk of stream) {
-                const piece = chunk.text ?? '';
-                if (piece) {
-                  rawText += piece;
-                  if (Date.now() - lastProgressAt >= 450) {
-                    lastProgressAt = Date.now();
-                    sendSse({
-                      type: 'stage',
-                      message: `${aiTarget.label} grading ${body.pages.length} page(s)...`,
-                    });
+        for (let tIdx = 0; tIdx < aiTargets.length && !parsed; tIdx++) {
+          const currentTarget = aiTargets[tIdx];
+          if (tIdx > 0 && wantsStream) {
+            sendSse({
+              type: 'stage',
+              message: `Switching to ${currentTarget.label} for uninterrupted copy evaluation...`,
+            });
+          }
+
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              const requestConfig = {
+                ...schemaConfig,
+                thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+              };
+              if (wantsStream) {
+                let rawText = '';
+                let lastProgressAt = Date.now();
+                const stream = await ai.models.generateContentStream({
+                  model: currentTarget.model,
+                  contents: {
+                    parts: [...imageParts, { text: promptText }],
+                  },
+                  config: requestConfig,
+                });
+                for await (const chunk of stream) {
+                  const piece = chunk.text ?? '';
+                  if (piece) {
+                    rawText += piece;
+                    if (Date.now() - lastProgressAt >= 450) {
+                      lastProgressAt = Date.now();
+                      sendSse({
+                        type: 'stage',
+                        message: `${currentTarget.label} grading ${body.pages.length} page(s)...`,
+                      });
+                    }
                   }
                 }
+                parsed = JSON.parse((rawText || '{}').trim());
+              } else {
+                const response = await ai.models.generateContent({
+                  model: currentTarget.model,
+                  contents: {
+                    parts: [...imageParts, { text: promptText }],
+                  },
+                  config: requestConfig,
+                });
+                const rawText = (response.text ?? '{}').trim();
+                parsed = JSON.parse(rawText);
               }
-              parsed = JSON.parse((rawText || '{}').trim());
-            } else {
-              const response = await ai.models.generateContent({
-                model: aiTarget.model,
-                contents: {
-                  parts: [...imageParts, { text: promptText }],
-                },
-                config: schemaConfig,
-              });
-              const rawText = (response.text ?? '{}').trim();
-              parsed = JSON.parse(rawText);
-            }
-            break;
-          } catch (err) {
-            lastErr = err;
-            if (!isRetryableGeminiError(err) || attempt >= 2) {
               break;
+            } catch (err) {
+              lastErr = err;
+              if (currentTarget.model === 'gemini-4-hydrogen' && isDailyQuotaExhaustedError(err)) {
+                hydrogenQuotaBlockedUntil = Date.now() + 15 * 60_000;
+                break; // Switch immediately to backup high-quota model
+              }
+              if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+                break;
+              }
+              if (wantsStream) {
+                sendSse({ type: 'stage', message: 'Retrying AI evaluation...' });
+              }
+              await new Promise((resolve) => setTimeout(resolve, 450 * Math.pow(2, attempt)));
             }
-            if (wantsStream) {
-              sendSse({ type: 'stage', message: 'Retrying AI evaluation...' });
-            }
-            await new Promise((resolve) => setTimeout(resolve, 500 * Math.pow(2, attempt)));
           }
         }
       } finally {
@@ -1269,12 +1393,12 @@ Rules (be concise and accurate so evaluation is fast):
       }
 
       if (!parsed) {
-        const message = lastErr instanceof Error ? lastErr.message : String(lastErr);
+        const message = formatFriendlyGeminiError(lastErr);
         if (wantsStream) {
-          sendSse({ type: 'error', error: `AI evaluation failed: ${message}` });
+          sendSse({ type: 'error', error: message });
           res.end();
         } else {
-          res.status(502).json({ error: `AI evaluation failed: ${message}` });
+          res.status(502).json({ error: message });
         }
         return;
       }
@@ -1438,6 +1562,8 @@ Instructions:
 5. Avoid starting lines inside an ideal answer with "1." or "2." (use bullet "-" or "Step 1:" instead) so each question/answer stays a clean single block.
 6. Return JSON matching the exact schema.`;
 
+      const extractTargets = buildAttemptTargets(aiTarget);
+
       let lastErr: unknown = null;
       let parsed: {
         items: Array<{
@@ -1447,54 +1573,60 @@ Instructions:
         }>;
       } | null = null;
 
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const response = await ai.models.generateContent({
-            model: aiTarget.model,
-            contents: {
-              parts: [...imageParts, { text: promptText }],
-            },
-            config: {
-              thinkingConfig: { thinkingLevel: aiTarget.thinkingLevel },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  items: {
-                    type: Type.ARRAY,
+      for (const currentTarget of extractTargets) {
+        if (parsed) break;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const response = await ai.models.generateContent({
+              model: currentTarget.model,
+              contents: {
+                parts: [...imageParts, { text: promptText }],
+              },
+              config: {
+                thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
                     items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        sourceLabel: { type: Type.STRING },
-                        questionText: { type: Type.STRING },
-                        idealAnswer: { type: Type.STRING },
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          sourceLabel: { type: Type.STRING },
+                          questionText: { type: Type.STRING },
+                          idealAnswer: { type: Type.STRING },
+                        },
+                        required: ['questionText', 'idealAnswer'],
                       },
-                      required: ['questionText', 'idealAnswer'],
                     },
                   },
+                  required: ['items'],
                 },
-                required: ['items'],
               },
-            },
-          });
+            });
 
-          const rawText = (response.text ?? '{}').trim();
-          parsed = JSON.parse(rawText);
-          break;
-        } catch (err) {
-          lastErr = err;
-          if (!isRetryableGeminiError(err) || attempt >= 2) {
+            const rawText = (response.text ?? '{}').trim();
+            parsed = JSON.parse(rawText);
             break;
+          } catch (err) {
+            lastErr = err;
+            if (currentTarget.model === 'gemini-4-hydrogen' && isDailyQuotaExhaustedError(err)) {
+              hydrogenQuotaBlockedUntil = Date.now() + 15 * 60_000;
+              break;
+            }
+            if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 450 * Math.pow(2, attempt)));
           }
-          await new Promise((resolve) => setTimeout(resolve, 500 * Math.pow(2, attempt)));
         }
       }
 
       if (!parsed || !Array.isArray(parsed.items) || parsed.items.length === 0) {
-        const message =
-          lastErr instanceof Error
-            ? lastErr.message
-            : 'Could not extract the requested questions from the photo(s). Please check the instruction and image clarity.';
+        const message = lastErr
+          ? formatFriendlyGeminiError(lastErr)
+          : 'Could not extract the requested questions from the photo(s). Please check the instruction and image clarity.';
         res.status(502).json({ error: message });
         return;
       }
