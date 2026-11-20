@@ -113,6 +113,12 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
   const [capturedPages, setCapturedPages] = useState<string[]>([]);
   const [processingPhotos, setProcessingPhotos] = useState(false);
   const [photoProgressText, setPhotoProgressText] = useState('');
+  const [scanningCopy, setScanningCopy] = useState(false);
+  const [scanStage, setScanStage] = useState('');
+  const [scanElapsedSecs, setScanElapsedSecs] = useState(0);
+  const [scannedCopyText, setScannedCopyText] = useState('');
+  const [scanCompleted, setScanCompleted] = useState(false);
+  const [pasteBlockedNotice, setPasteBlockedNotice] = useState('');
   const [submittingCopy, setSubmittingCopy] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
   const [submitElapsedSecs, setSubmitElapsedSecs] = useState(0);
@@ -337,6 +343,17 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
   }, [examStep]);
 
   useEffect(() => {
+    if (!scanningCopy) {
+      setScanElapsedSecs(0);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setScanElapsedSecs((prev) => prev + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [scanningCopy]);
+
+  useEffect(() => {
     if (!submittingCopy) {
       setSubmitElapsedSecs(0);
       return;
@@ -388,6 +405,8 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
     });
     if (compressed) {
       setCapturedPages((prev) => [...prev.slice(0, 19), compressed]);
+      setScanCompleted(false);
+      setSubmitError('');
     }
   };
 
@@ -415,6 +434,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
       );
       if (valid.length > 0) {
         setCapturedPages((prev) => [...prev, ...valid].slice(0, 20));
+        setScanCompleted(false);
       }
     } finally {
       setProcessingPhotos(false);
@@ -628,6 +648,11 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
   const openTest = (test: ExamTest) => {
     setSelectedTest(test);
     setCapturedPages([]);
+    setScannedCopyText('');
+    setScanCompleted(false);
+    setScanningCopy(false);
+    setScanStage('');
+    setPasteBlockedNotice('');
     setSubmitError('');
     const existingSub = submissions.find((s) => s.testId === test.testId);
     if (existingSub) {
@@ -664,19 +689,140 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
     }
   };
 
+  const handleScanCopyPages = async () => {
+    if (!selectedTest) return;
+    if (capturedPages.length === 0) {
+      setSubmitError('Please capture at least 1 clear photo of your answer copy first.');
+      return;
+    }
+
+    setScanningCopy(true);
+    const chunkPreviewCount = Math.min(4, capturedPages.length);
+    setScanStage(
+      `Scanning ${capturedPages.length} page(s) across ${chunkPreviewCount} Gemini worker(s)...`
+    );
+    setSubmitError('');
+    setPasteBlockedNotice('');
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 120_000);
+
+    try {
+      let scanResp: Response;
+      try {
+        scanResp = await fetch('/api/scan-copy-pages?stream=1', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream, application/json',
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            pages: capturedPages,
+            thinkingLevel: aiConfig.studentLevel,
+            subject: selectedTest.subject,
+            testTitle: selectedTest.title,
+          }),
+        });
+      } catch (fetchErr) {
+        if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
+          throw new Error('Scan timed out (120s). Please tap Scan Answer Copy again.');
+        }
+        throw fetchErr;
+      }
+
+      type ScanResultPayload = {
+        scannedText?: string;
+        chunkCount?: number;
+        keysConfigured?: number;
+        error?: string;
+      };
+
+      let scanData: ScanResultPayload | null = null;
+      const contentType = scanResp.headers.get('content-type') || '';
+
+      try {
+        if (contentType.includes('text/event-stream') && scanResp.body) {
+          const reader = scanResp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.split('\n\n');
+            buffer = blocks.pop() || '';
+            for (const block of blocks) {
+              const dataLines = block
+                .split('\n')
+                .filter((line) => line.startsWith('data:'))
+                .map((line) => line.slice(5).trim());
+              if (dataLines.length === 0) continue;
+              const rawEvent = dataLines.join('\n');
+              try {
+                const evt = JSON.parse(rawEvent) as {
+                  type?: string;
+                  message?: string;
+                  error?: string;
+                  data?: ScanResultPayload;
+                };
+                if (evt.type === 'stage' && evt.message) {
+                  setScanStage(evt.message);
+                } else if (evt.type === 'error') {
+                  throw new Error(evt.error || 'Copy scan failed. Please retry.');
+                } else if (evt.type === 'result' && evt.data) {
+                  scanData = evt.data;
+                }
+              } catch (parseErr) {
+                if (
+                  parseErr instanceof Error &&
+                  parseErr.message !== rawEvent &&
+                  !parseErr.message.includes('JSON')
+                ) {
+                  throw parseErr;
+                }
+              }
+            }
+          }
+        } else {
+          scanData = await parseJsonResponse<ScanResultPayload>(scanResp);
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+
+      if (!scanResp.ok || !scanData || !scanData.scannedText) {
+        throw new Error(scanData?.error || 'Could not scan your copy pages. Please try again.');
+      }
+
+      setScannedCopyText(scanData.scannedText);
+      setScanCompleted(true);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Copy scan failed.');
+    } finally {
+      setScanningCopy(false);
+      setScanStage('');
+    }
+  };
+
   const handleSubmitAnswerCopy = async () => {
     if (!selectedTest || !profile || !user) return;
     if (capturedPages.length === 0) {
       setSubmitError('Please capture at least 1 clear photo of your answer copy.');
       return;
     }
+    if (!scanCompleted || !scannedCopyText.trim()) {
+      setSubmitError('Please run Step 1 (Scan Answer Copy) and review your text before Final Submit.');
+      return;
+    }
 
     setSubmittingCopy(true);
-    setSubmitStage(`Uploading ${capturedPages.length} page(s) to AI...`);
+    setSubmitStage('Checking your scanned answers...');
     setSubmitError('');
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 150_000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 120_000);
 
     try {
       const submissionId = `sub_${selectedTest.testId}_${user.uid}`.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -685,7 +831,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
 
       let gradeResp: Response;
       try {
-        gradeResp = await fetch('/api/grade-submission?stream=1', {
+        gradeResp = await fetch('/api/grade-scanned-text?stream=1', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -706,13 +852,14 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
             guardianMobile: profile.guardianMobile,
             questions: selectedTest.questions,
             encryptedAnswerKey: selectedTest.encryptedAnswerKey,
-            pages: capturedPages,
+            scannedText: scannedCopyText.trim(),
+            pageCount: capturedPages.length,
             thinkingLevel: aiConfig.studentLevel,
           }),
         });
       } catch (fetchErr) {
         if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-          throw new Error('Server took too long to respond (150s). Please tap Final Submit again.');
+          throw new Error('Server took too long to respond (120s). Please tap Final Submit again.');
         }
         throw fetchErr;
       }
@@ -1496,9 +1643,10 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
                       <button
                         type="button"
                         aria-label={`Remove page ${idx + 1}`}
-                        onClick={() =>
-                          setCapturedPages((prev) => prev.filter((_, i) => i !== idx))
-                        }
+                        onClick={() => {
+                          setCapturedPages((prev) => prev.filter((_, i) => i !== idx));
+                          setScanCompleted(false);
+                        }}
                         className="absolute top-1.5 right-1.5 rounded-md bg-red-600 p-1 text-white hover:bg-red-700 cursor-pointer"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1506,6 +1654,117 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* STEP 1: Fast Parallel Copy Scan Button */}
+            <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-blue-900">
+                    Step 1 · Scan Copy Photos into Text ({capturedPages.length} page(s))
+                  </div>
+                  <p className="text-xs text-blue-800 mt-0.5">
+                    Photo ko {Math.min(4, Math.max(1, capturedPages.length))} bhag me baat kar AI tezi se aapka likha hua neeche box me dikhayega.
+                  </p>
+                </div>
+                {scanCompleted && (
+                  <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700">
+                    <CheckCircle2 className="w-4 h-4" />
+                    Scanned Ready
+                  </span>
+                )}
+              </div>
+
+              <button
+                type="button"
+                disabled={scanningCopy || submittingCopy || processingPhotos || capturedPages.length === 0}
+                onClick={handleScanCopyPages}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-blue-900 py-3 px-5 text-sm font-bold text-white hover:bg-blue-800 transition-colors cursor-pointer disabled:opacity-50 min-h-[48px]"
+              >
+                {scanningCopy ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    {scanStage || 'Scanning Copy Pages...'} ({scanElapsedSecs}s)
+                  </>
+                ) : (
+                  <>
+                    {scanCompleted ? <RotateCcw className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
+                    {scanCompleted
+                      ? `Re-scan Answer Copy (${capturedPages.length} Pages)`
+                      : `Step 1: Scan Answer Copy (${capturedPages.length} Pages)`}
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* STEP 2: Editable Scanned Text Review Box (Typing Allowed, Paste Blocked) */}
+            {(scanCompleted || scannedCopyText.length > 0) && (
+              <div className="rounded-xl border border-slate-300 bg-slate-50 p-4 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label
+                    htmlFor="scanned-copy-review-box"
+                    className="text-sm font-bold text-slate-900"
+                  >
+                    Step 2 · Review &amp; Type-Fix Your Scanned Copy
+                  </label>
+                  <span className="text-[11px] font-semibold text-amber-800 bg-amber-100 px-2.5 py-0.5 rounded-md">
+                    Typing ON · Copy-Paste Disabled
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Dekh len ki aapne jo copy me likha tha wahi sab neeche dikh raha hai. Agar koi shabd ya number galat scan hua ho to keyboard se type karke sudhar len (Paste karna band hai). Uske baad Final Submit dabayen.
+                </p>
+
+                {!scanCompleted && (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 font-medium">
+                    Photos badli gayi hain — kripya upar &quot;Step 1: Scan Answer Copy&quot; button dubara dabayen.
+                  </div>
+                )}
+
+                {pasteBlockedNotice && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 font-medium">
+                    {pasteBlockedNotice}
+                  </div>
+                )}
+
+                <textarea
+                  id="scanned-copy-review-box"
+                  rows={12}
+                  spellCheck={false}
+                  value={scannedCopyText}
+                  onChange={(e) => setScannedCopyText(e.target.value)}
+                  onPaste={(e) => {
+                    e.preventDefault();
+                    setPasteBlockedNotice('Paste is disabled here — please type using your keyboard to fix any OCR typo.');
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setPasteBlockedNotice('Drag & drop paste is disabled — please type to edit.');
+                  }}
+                  onKeyDown={(e) => {
+                    if (
+                      ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') ||
+                      (e.shiftKey && e.key === 'Insert')
+                    ) {
+                      e.preventDefault();
+                      setPasteBlockedNotice('Paste shortcut is disabled — please type using your keyboard.');
+                    }
+                  }}
+                  onBeforeInput={(e) => {
+                    const nativeEvent = e.nativeEvent as InputEvent;
+                    if (
+                      nativeEvent?.inputType === 'insertFromPaste' ||
+                      nativeEvent?.inputType === 'insertFromDrop'
+                    ) {
+                      e.preventDefault();
+                      setPasteBlockedNotice('Clipboard paste is disabled — please type to edit.');
+                    }
+                  }}
+                  placeholder="Your scanned copy text will appear here..."
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-3 text-xs sm:text-sm text-slate-900 font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-900"
+                />
               </div>
             )}
 
@@ -1517,19 +1776,28 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
 
             <button
               type="button"
-              disabled={submittingCopy || processingPhotos || capturedPages.length === 0}
+              disabled={
+                submittingCopy ||
+                scanningCopy ||
+                processingPhotos ||
+                capturedPages.length === 0 ||
+                !scanCompleted ||
+                !scannedCopyText.trim()
+              }
               onClick={handleSubmitAnswerCopy}
               className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 py-3.5 px-6 text-sm font-bold text-white hover:bg-emerald-800 transition-colors cursor-pointer disabled:opacity-50 min-h-[52px]"
             >
               {submittingCopy ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  {submitStage || 'Evaluating & Submitting Copy...'} ({submitElapsedSecs}s)
+                  {submitStage || 'Checking & Submitting Copy...'} ({submitElapsedSecs}s)
                 </>
               ) : (
                 <>
                   <Upload className="w-5 h-5" />
-                  Final Submit Answer Copy ({capturedPages.length} Pages)
+                  {scanCompleted
+                    ? `Step 2: Final Submit & Fast AI Check (${capturedPages.length} Pages)`
+                    : 'Final Submit (Complete Step 1 Scan First)'}
                 </>
               )}
             </button>

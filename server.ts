@@ -62,7 +62,43 @@ interface EmailJobPayload {
 
 let isProcessingEmailQueue = false;
 
-let hydrogenQuotaBlockedUntil = 0;
+const blockedKeyModels = new Map<string, number>();
+
+function stripWrappingQuotes(val: string): string {
+  return val.trim().replace(/^["']|["']$/g, '').trim();
+}
+
+function getConfiguredGeminiKeys(): string[] {
+  const candidates = [
+    process.env.GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3,
+    process.env.GEMINI_API_KEY_4,
+  ];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of candidates) {
+    const cleaned = stripWrappingQuotes(raw || '');
+    if (cleaned && !seen.has(cleaned)) {
+      seen.add(cleaned);
+      result.push(cleaned);
+    }
+  }
+  return result;
+}
+
+function getGroqApiKey(): string {
+  return stripWrappingQuotes(process.env.GROQ_API_KEY || '');
+}
+
+function isKeyModelBlocked(keyIndex: number, model: string): boolean {
+  const until = blockedKeyModels.get(`${keyIndex}:${model}`) ?? 0;
+  return Date.now() < until;
+}
+
+function markKeyModelBlocked(keyIndex: number, model: string): void {
+  blockedKeyModels.set(`${keyIndex}:${model}`, Date.now() + 15 * 60_000);
+}
 
 function getRawErrorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -181,8 +217,8 @@ function decryptJson<T>(token: string): T {
   return JSON.parse(decrypted.toString('utf8')) as T;
 }
 
-function createGenAIClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
+function createGenAIClient(explicitApiKey?: string): GoogleGenAI {
+  const apiKey = explicitApiKey || getConfiguredGeminiKeys()[0];
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not configured on the server.');
   }
@@ -194,6 +230,25 @@ function createGenAIClient(): GoogleGenAI {
       },
     },
   });
+}
+
+function extractJsonObject<T>(raw: string): T {
+  const trimmed = (raw || '').trim();
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    const cleaned = trimmed
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```$/i, '')
+      .trim();
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as T;
+    }
+    return JSON.parse(cleaned) as T;
+  }
 }
 
 type AiThinkingPreset = 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH';
@@ -266,37 +321,81 @@ function resolveAiThinkingTarget(preset: AiThinkingPreset): {
   }
 }
 
-function buildAttemptTargets(primary: {
+interface MultiKeyTarget {
+  keyIndex: number;
+  apiKey: string;
   model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
   thinkingLevel: ThinkingLevel;
   label: string;
-}) {
-  const flashLiteBackup = {
-    model: 'gemini-3.1-flash-lite' as const,
-    thinkingLevel: ThinkingLevel.MINIMAL,
-    label: 'Gemini 3.1 Flash Lite (High-Quota Backup)',
-  };
-  const hydrogenBackup = {
-    model: 'gemini-4-hydrogen' as const,
-    thinkingLevel: ThinkingLevel.LOW,
-    label: 'Gemini 4 Hydrogen (Backup)',
-  };
-
-  if (primary.model === 'gemini-4-hydrogen') {
-    if (Date.now() < hydrogenQuotaBlockedUntil) {
-      // Skip known-exhausted Hydrogen free tier for 15 mins so students never wait
-      return [flashLiteBackup];
-    }
-    return [primary, flashLiteBackup];
-  }
-  if (Date.now() < hydrogenQuotaBlockedUntil) {
-    return [primary];
-  }
-  return [primary, hydrogenBackup];
 }
 
-function stripWrappingQuotes(val: string): string {
-  return val.trim().replace(/^["']|["']$/g, '').trim();
+function buildAttemptTargets(
+  primary: {
+    model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+    thinkingLevel: ThinkingLevel;
+    label: string;
+  },
+  preferredKeyIndex = 0
+): MultiKeyTarget[] {
+  const keys = getConfiguredGeminiKeys();
+  if (keys.length === 0) {
+    throw new Error('GEMINI_API_KEY is not configured on the server.');
+  }
+
+  const orderedKeyIndices = keys.map((_, offset) => (preferredKeyIndex + offset) % keys.length);
+  const secondaryConfig =
+    primary.model === 'gemini-4-hydrogen'
+      ? {
+          model: 'gemini-3.1-flash-lite' as const,
+          thinkingLevel: ThinkingLevel.MINIMAL,
+          label: 'Gemini 3.1 Flash Lite',
+        }
+      : {
+          model: 'gemini-4-hydrogen' as const,
+          thinkingLevel: ThinkingLevel.LOW,
+          label: 'Gemini 4 Hydrogen',
+        };
+
+  const targets: MultiKeyTarget[] = [];
+
+  for (const keyIndex of orderedKeyIndices) {
+    if (!isKeyModelBlocked(keyIndex, primary.model)) {
+      targets.push({
+        keyIndex,
+        apiKey: keys[keyIndex],
+        model: primary.model,
+        thinkingLevel: primary.thinkingLevel,
+        label: `${primary.label} [Key ${keyIndex + 1}]`,
+      });
+    }
+  }
+
+  for (const keyIndex of orderedKeyIndices) {
+    if (!isKeyModelBlocked(keyIndex, secondaryConfig.model)) {
+      targets.push({
+        keyIndex,
+        apiKey: keys[keyIndex],
+        model: secondaryConfig.model,
+        thinkingLevel: secondaryConfig.thinkingLevel,
+        label: `${secondaryConfig.label} [Key ${keyIndex + 1}]`,
+      });
+    }
+  }
+
+  // Always retain at least one fallback if every key was temporarily marked
+  if (targets.length === 0) {
+    for (const keyIndex of orderedKeyIndices) {
+      targets.push({
+        keyIndex,
+        apiKey: keys[keyIndex],
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: ThinkingLevel.MINIMAL,
+        label: `Gemini 3.1 Flash Lite [Key ${keyIndex + 1}]`,
+      });
+    }
+  }
+
+  return targets;
 }
 
 interface SanitizedSmtpConfig {
@@ -950,7 +1049,12 @@ async function startServer() {
   app.use(express.json({ limit: '35mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'safal-academy-live' });
+    res.json({
+      ok: true,
+      service: 'safal-academy-live',
+      geminiKeyCount: getConfiguredGeminiKeys().length,
+      groqConfigured: Boolean(getGroqApiKey()),
+    });
   });
 
   app.get('/api/ai-config', (_req, res) => {
@@ -1066,7 +1170,6 @@ async function startServer() {
 
       const mimeType = match[1];
       const base64Data = match[2];
-      const ai = createGenAIClient();
 
       const prompt = `You are a strict student identity photo verifier for Safal Academy Live.
 Inspect this uploaded student selfie image carefully.
@@ -1102,6 +1205,7 @@ Return JSON matching the exact schema:
 
       for (const target of selfieTargets) {
         if (parsed) break;
+        const ai = createGenAIClient(target.apiKey);
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const response = await ai.models.generateContent({
@@ -1133,15 +1237,15 @@ Return JSON matching the exact schema:
             });
 
             const rawText = (response.text ?? '{}').trim();
-            parsed = JSON.parse(rawText);
+            parsed = extractJsonObject(rawText);
             break;
           } catch (err) {
             lastErr = err;
-            if (target.model === 'gemini-4-hydrogen' && isDailyQuotaExhaustedError(err)) {
-              hydrogenQuotaBlockedUntil = Date.now() + 15 * 60_000;
+            if (isDailyQuotaExhaustedError(err)) {
+              markKeyModelBlocked(target.keyIndex, target.model);
               break;
             }
-            if (!isRetryableGeminiError(err) || attempt >= 1) {
+            if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
               break;
             }
             await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
@@ -1176,6 +1280,590 @@ Return JSON matching the exact schema:
         valid: false,
         reason: err instanceof Error ? err.message : 'Selfie verification error.',
       });
+    }
+  });
+
+  // STEP 1 (Fast 4-Way Parallel Copy Scan): Split N pages evenly across up to 4 Gemini API keys
+  app.post('/api/scan-copy-pages', async (req, res) => {
+    const wantsStream =
+      req.query.stream === '1' ||
+      String(req.headers.accept || '').includes('text/event-stream');
+
+    const sendSse = (eventObj: Record<string, unknown>) => {
+      if (!wantsStream || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(eventObj)}\n\n`);
+    };
+
+    try {
+      const body = req.body as {
+        pages?: string[];
+        thinkingLevel?: string;
+        subject?: string;
+        testTitle?: string;
+      };
+
+      if (!body.pages || !Array.isArray(body.pages) || body.pages.length === 0 || body.pages.length > 20) {
+        res.status(400).json({ error: 'Please capture between 1 and 20 answer copy pages to scan.' });
+        return;
+      }
+
+      const configuredKeys = getConfiguredGeminiKeys();
+      if (configuredKeys.length === 0) {
+        res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+        return;
+      }
+
+      const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
+      const aiTarget = resolveAiThinkingTarget(aiPreset);
+
+      const totalPages = body.pages.length;
+      const chunkCount = Math.min(4, totalPages);
+      const baseSize = Math.floor(totalPages / chunkCount);
+      const remainder = totalPages % chunkCount;
+
+      interface ScanChunk {
+        chunkIndex: number;
+        startPageNum: number; // 1-based
+        pages: string[];
+      }
+
+      const chunks: ScanChunk[] = [];
+      let cursor = 0;
+      for (let i = 0; i < chunkCount; i++) {
+        const size = baseSize + (i < remainder ? 1 : 0);
+        chunks.push({
+          chunkIndex: i,
+          startPageNum: cursor + 1,
+          pages: body.pages.slice(cursor, cursor + size),
+        });
+        cursor += size;
+      }
+
+      if (wantsStream) {
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
+        sendSse({
+          type: 'stage',
+          message: `Scanning ${totalPages} page(s) in ${chunkCount} parallel part(s) across ${configuredKeys.length} Gemini key(s)...`,
+        });
+      }
+
+      const heartbeat = wantsStream
+        ? setInterval(() => {
+            if (!res.writableEnded) {
+              res.write(': keep-alive\n\n');
+            }
+          }, 3_000)
+        : null;
+
+      let completedChunks = 0;
+      let chunkResults: Array<Array<{ pageNumber: number; extractedText: string }>> = [];
+
+      try {
+        chunkResults = await Promise.all(
+          chunks.map(async (chunk) => {
+            const preferredKeyIdx = chunk.chunkIndex % configuredKeys.length;
+            const targets = buildAttemptTargets(aiTarget, preferredKeyIdx);
+            const endPageNum = chunk.startPageNum + chunk.pages.length - 1;
+
+            const imageParts = chunk.pages.map((dataUrl) => {
+              const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+              return {
+                inlineData: {
+                  mimeType: match ? match[1] : 'image/jpeg',
+                  data: match ? match[2] : dataUrl,
+                },
+              };
+            });
+
+            const pageLabelList = chunk.pages
+              .map((_, idx) => `Image ${idx + 1} = Page ${chunk.startPageNum + idx}`)
+              .join(', ');
+
+            const scanPrompt = `You are a high-accuracy handwritten answer copy OCR scanner for Safal Academy Live.
+Subject: ${body.subject || 'School Exam'} | Test: ${body.testTitle || 'Student Copy'}
+Images provided in order: ${pageLabelList}.
+
+Instructions:
+1. Transcribe EVERY handwritten word, question number (Q1, Q2, Ans 1, etc.), Hindi/Devanagari script, English text, mathematical equations, formulas, steps, and diagram labels visible on each page.
+2. Keep the student's wording completely faithful — DO NOT correct mistakes, invent missing answers, or solve unanswered questions.
+3. Preserve question numbers and clean line breaks so the student can verify their copy easily.
+4. If a diagram/figure is drawn, mention it briefly in brackets like [Diagram: triangle ABC with angle B=90].
+5. If a page is blank or illegible, state "(Page blank or unclear)".
+6. Return JSON matching the schema with pageNumber from ${chunk.startPageNum} to ${endPageNum}.`;
+
+            let lastErr: unknown = null;
+            let parsedChunk: { pages?: Array<{ pageNumber: number; extractedText: string }> } | null = null;
+
+            for (const currentTarget of targets) {
+              if (parsedChunk) break;
+              const ai = createGenAIClient(currentTarget.apiKey);
+              for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                  const response = await ai.models.generateContent({
+                    model: currentTarget.model,
+                    contents: {
+                      parts: [...imageParts, { text: scanPrompt }],
+                    },
+                    config: {
+                      thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+                      responseMimeType: 'application/json',
+                      responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                          pages: {
+                            type: Type.ARRAY,
+                            items: {
+                              type: Type.OBJECT,
+                              properties: {
+                                pageNumber: { type: Type.INTEGER },
+                                extractedText: { type: Type.STRING },
+                              },
+                              required: ['pageNumber', 'extractedText'],
+                            },
+                          },
+                        },
+                        required: ['pages'],
+                      },
+                    },
+                  });
+
+                  const rawText = (response.text ?? '{}').trim();
+                  const candidate = extractJsonObject<{
+                    pages?: Array<{ pageNumber: number; extractedText: string }>;
+                  }>(rawText);
+                  if (candidate && Array.isArray(candidate.pages) && candidate.pages.length > 0) {
+                    parsedChunk = candidate;
+                    break;
+                  }
+                  lastErr = new Error('Empty OCR output from Gemini.');
+                } catch (err) {
+                  lastErr = err;
+                  if (isDailyQuotaExhaustedError(err)) {
+                    markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
+                    break;
+                  }
+                  if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+                    break;
+                  }
+                  await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
+                }
+              }
+            }
+
+            if (!parsedChunk || !parsedChunk.pages) {
+              throw lastErr instanceof Error
+                ? lastErr
+                : new Error(formatFriendlyGeminiError(lastErr));
+            }
+
+            completedChunks += 1;
+            if (wantsStream) {
+              sendSse({
+                type: 'stage',
+                message: `Scanned part ${completedChunks}/${chunkCount} (Pages ${chunk.startPageNum}-${endPageNum} ready)...`,
+              });
+            }
+
+            return chunk.pages.map((_, idx) => {
+              const targetPageNo = chunk.startPageNum + idx;
+              const matched =
+                parsedChunk?.pages?.find((p) => Number(p.pageNumber) === targetPageNo) ||
+                parsedChunk?.pages?.[idx];
+              return {
+                pageNumber: targetPageNo,
+                extractedText: (matched?.extractedText || '').trim(),
+              };
+            });
+          })
+        );
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+      }
+
+      const orderedPages = chunkResults
+        .flat()
+        .sort((a, b) => a.pageNumber - b.pageNumber);
+
+      const scannedText = orderedPages
+        .map((p) => `--- Page ${p.pageNumber} ---\n${p.extractedText || '(No readable text found)'}`)
+        .join('\n\n');
+
+      const responsePayload = {
+        scannedText,
+        pageTexts: orderedPages,
+        chunkCount,
+        keysConfigured: configuredKeys.length,
+      };
+
+      if (wantsStream) {
+        sendSse({ type: 'result', data: responsePayload });
+        res.end();
+      } else {
+        res.json(responsePayload);
+      }
+    } catch (err) {
+      console.error('Scan copy pages error:', err);
+      const message = formatFriendlyGeminiError(err);
+      if (wantsStream && res.headersSent) {
+        sendSse({ type: 'error', error: message });
+        res.end();
+      } else {
+        res.status(502).json({ error: message });
+      }
+    }
+  });
+
+  // STEP 2 (Ultra-Fast Text Grading): Grade reviewed copy text with Groq (fallback to Gemini multi-key)
+  app.post('/api/grade-scanned-text', async (req, res) => {
+    const wantsStream =
+      req.query.stream === '1' ||
+      String(req.headers.accept || '').includes('text/event-stream');
+
+    const sendSse = (eventObj: Record<string, unknown>) => {
+      if (!wantsStream || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(eventObj)}\n\n`);
+    };
+
+    try {
+      const body = req.body as {
+        submissionId: string;
+        testId: string;
+        testTitle: string;
+        subject: string;
+        targetClass: string;
+        expiryTime: string;
+        studentName: string;
+        studentSchool: string;
+        studentEmail: string;
+        studentMobile: string;
+        guardianMobile: string;
+        questions: QuestionItem[];
+        encryptedAnswerKey: string;
+        scannedText: string;
+        pageCount?: number;
+        thinkingLevel?: string;
+      };
+
+      const cleanedScannedText =
+        typeof body.scannedText === 'string' ? body.scannedText.trim().slice(0, 120_000) : '';
+      if (!cleanedScannedText) {
+        res.status(400).json({ error: 'Scanned answer text is missing. Please run Step 1 Scan first.' });
+        return;
+      }
+      if (!body.questions || !Array.isArray(body.questions) || body.questions.length === 0) {
+        res.status(400).json({ error: 'Test questions are missing.' });
+        return;
+      }
+      if (!body.encryptedAnswerKey) {
+        res.status(400).json({ error: 'Encrypted ideal answer key is missing.' });
+        return;
+      }
+
+      const groqApiKey = getGroqApiKey();
+
+      if (wantsStream) {
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
+        sendSse({
+          type: 'stage',
+          message: groqApiKey
+            ? 'Groq AI fast-checking your scanned answers...'
+            : 'AI evaluating your scanned answers...',
+        });
+      }
+
+      const idealAnswers = decryptJson<IdealAnswerItem[]>(body.encryptedAnswerKey);
+      const rubricLines = body.questions
+        .map((q) => {
+          const ideal = idealAnswers.find((a) => a.qNo === q.qNo)?.idealAnswer || '';
+          return `Question ${q.qNo} (Max Marks: ${q.marks}):\nQuestion Text: ${q.questionText}\nTeacher Ideal Answer: ${ideal}`;
+        })
+        .join('\n\n---\n\n');
+
+      const promptText = `You are a fast, fair academic examiner for Safal Academy Live.
+Evaluate the student's scanned & verified answer copy text (${body.pageCount || 1} page(s)) for:
+Test: ${body.testTitle} (${body.subject}, ${body.targetClass}) | Student: ${body.studentName}
+
+Questions & Teacher Ideal Answers:
+${rubricLines}
+
+Student's Scanned Answer Copy Text:
+"""
+${cleanedScannedText}
+"""
+
+Rules:
+1. Match each written answer carefully to Q1, Q2, etc. (support English, Hindi/Devanagari, math formulas/steps).
+2. For "studentAnswer": give a concise faithful summary/key steps & final answer from the student's scanned text (1-3 short lines; write "Not attempted by student" if missing).
+3. Grade fairly with step-marking against Max Marks; never exceed Max Marks.
+4. For "causeOfDeduction": 1 crisp sentence explaining deduction, or "No deduction — accurate and complete answer" if full marks.
+5. For "overallAdvice": 2-3 concise, practical study sentences.
+6. Return ONLY valid JSON strictly matching this shape:
+{
+  "questionReports": [
+    {
+      "qNo": 1,
+      "studentAnswer": "...",
+      "marksObtained": 0,
+      "causeOfDeduction": "..."
+    }
+  ],
+  "overallAdvice": "..."
+}`;
+
+      type ParsedGrade = {
+        questionReports: Array<{
+          qNo: number;
+          studentAnswer: string;
+          marksObtained: number;
+          causeOfDeduction: string;
+        }>;
+        overallAdvice: string;
+      };
+
+      let parsed: ParsedGrade | null = null;
+      let gradedBy: 'groq' | 'gemini' = 'gemini';
+      let lastErr: unknown = null;
+
+      const heartbeat = wantsStream
+        ? setInterval(() => {
+            if (!res.writableEnded) {
+              res.write(': keep-alive\n\n');
+            }
+          }, 3_000)
+        : null;
+
+      try {
+        // 1) Try Groq API first (ultra fast 1-2s text grading)
+        if (groqApiKey) {
+          const groqModels = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+          for (const groqModel of groqModels) {
+            if (parsed) break;
+            try {
+              const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${groqApiKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  model: groqModel,
+                  temperature: 0.1,
+                  max_tokens: 4096,
+                  response_format: { type: 'json_object' },
+                  messages: [
+                    {
+                      role: 'system',
+                      content:
+                        'You are an accurate academic answer sheet examiner. Always output valid JSON only.',
+                    },
+                    { role: 'user', content: promptText },
+                  ],
+                }),
+                signal: AbortSignal.timeout(45_000),
+              });
+
+              const groqRaw = await groqResp.text();
+              if (!groqResp.ok) {
+                throw new Error(`Groq HTTP ${groqResp.status}: ${groqRaw.slice(0, 200)}`);
+              }
+
+              const groqJson = JSON.parse(groqRaw) as {
+                choices?: Array<{ message?: { content?: string } }>;
+              };
+              const content = groqJson?.choices?.[0]?.message?.content || '{}';
+              const candidate = extractJsonObject<ParsedGrade>(content);
+              if (candidate && Array.isArray(candidate.questionReports)) {
+                parsed = candidate;
+                gradedBy = 'groq';
+                break;
+              }
+            } catch (groqErr) {
+              lastErr = groqErr;
+              console.warn(`Groq (${groqModel}) check failed, continuing fallback:`, groqErr);
+            }
+          }
+        }
+
+        // 2) Automatic Fallback to Gemini Multi-Key text grading if GROQ_API_KEY is unset or failed
+        if (!parsed && getConfiguredGeminiKeys().length > 0) {
+          if (wantsStream && groqApiKey) {
+            sendSse({
+              type: 'stage',
+              message: 'Switching to Gemini backup for final checking...',
+            });
+          }
+          const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
+          const aiTarget = resolveAiThinkingTarget(aiPreset);
+          const aiTargets = buildAttemptTargets(aiTarget, 0);
+
+          for (const currentTarget of aiTargets) {
+            if (parsed) break;
+            const ai = createGenAIClient(currentTarget.apiKey);
+            for (let attempt = 0; attempt < 2; attempt++) {
+              try {
+                const response = await ai.models.generateContent({
+                  model: currentTarget.model,
+                  contents: promptText,
+                  config: {
+                    thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+                    responseMimeType: 'application/json',
+                    responseSchema: {
+                      type: Type.OBJECT,
+                      properties: {
+                        questionReports: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.OBJECT,
+                            properties: {
+                              qNo: { type: Type.INTEGER },
+                              studentAnswer: { type: Type.STRING },
+                              marksObtained: { type: Type.NUMBER },
+                              causeOfDeduction: { type: Type.STRING },
+                            },
+                            required: ['qNo', 'studentAnswer', 'marksObtained', 'causeOfDeduction'],
+                          },
+                        },
+                        overallAdvice: { type: Type.STRING },
+                      },
+                      required: ['questionReports', 'overallAdvice'],
+                    },
+                  },
+                });
+                const candidate = extractJsonObject<ParsedGrade>((response.text ?? '{}').trim());
+                if (candidate && Array.isArray(candidate.questionReports)) {
+                  parsed = candidate;
+                  gradedBy = 'gemini';
+                  break;
+                }
+              } catch (err) {
+                lastErr = err;
+                if (isDailyQuotaExhaustedError(err)) {
+                  markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
+                  break;
+                }
+                if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+                  break;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
+              }
+            }
+          }
+        }
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+      }
+
+      if (!parsed || !Array.isArray(parsed.questionReports)) {
+        const message = lastErr
+          ? formatFriendlyGeminiError(lastErr)
+          : 'AI grading failed. Please check GROQ_API_KEY / GEMINI_API_KEY and retry.';
+        if (wantsStream) {
+          sendSse({ type: 'error', error: message });
+          res.end();
+        } else {
+          res.status(502).json({ error: message });
+        }
+        return;
+      }
+
+      const finalReports: QuestionReportItem[] = body.questions.map((q) => {
+        const aiItem = parsed?.questionReports?.find((item) => Number(item.qNo) === q.qNo);
+        const teacherIdeal = idealAnswers.find((a) => a.qNo === q.qNo)?.idealAnswer || '';
+        const rawMarks = Number(aiItem?.marksObtained ?? 0);
+        const safeMarks = Number.isFinite(rawMarks) ? rawMarks : 0;
+        const clampedMarks = Math.max(0, Math.min(q.marks, safeMarks));
+        const roundedMarks = Math.round(clampedMarks * 100) / 100;
+        return {
+          qNo: q.qNo,
+          questionText: q.questionText,
+          studentAnswer: aiItem?.studentAnswer?.trim() || 'Not attempted by student',
+          marksObtained: roundedMarks,
+          maxMarks: q.marks,
+          causeOfDeduction:
+            aiItem?.causeOfDeduction?.trim() ||
+            (roundedMarks >= q.marks
+              ? 'No deduction — accurate and complete answer'
+              : 'Incomplete or missing key points'),
+          idealAnswer: teacherIdeal,
+        };
+      });
+
+      const obtainedMarks =
+        Math.round(finalReports.reduce((sum, r) => sum + r.marksObtained, 0) * 100) / 100;
+      const totalMarks =
+        Math.round(body.questions.reduce((sum, q) => sum + q.marks, 0) * 100) / 100;
+      const percentage = totalMarks > 0 ? Math.round((obtainedMarks / totalMarks) * 1000) / 10 : 0;
+      const overallAdvice = (
+        parsed.overallAdvice || 'Keep practicing neatly and review the ideal answers above.'
+      ).slice(0, 3800);
+
+      const emailJob: EmailJobPayload = {
+        submissionId: body.submissionId,
+        testId: body.testId,
+        testTitle: body.testTitle,
+        subject: body.subject,
+        targetClass: body.targetClass,
+        expiryTime: body.expiryTime,
+        studentName: body.studentName,
+        studentSchool: body.studentSchool,
+        studentEmail: body.studentEmail,
+        studentMobile: body.studentMobile,
+        guardianMobile: body.guardianMobile,
+        obtainedMarks,
+        totalMarks,
+        percentage,
+        questionReports: finalReports,
+        overallAdvice,
+        sent: false,
+      };
+
+      const expiryMs = new Date(body.expiryTime).getTime();
+      const emailStatus: 'scheduled' | 'sent' | 'pending_smtp' =
+        Number.isFinite(expiryMs) && Date.now() >= expiryMs && !isSmtpConfigured()
+          ? 'pending_smtp'
+          : 'scheduled';
+      const emailSentAt = '';
+
+      upsertEmailQueueJob(emailJob);
+
+      if (Number.isFinite(expiryMs) && Date.now() >= expiryMs && isSmtpConfigured()) {
+        void processExpiredEmailQueue();
+      }
+
+      const resultPayload = {
+        obtainedMarks,
+        totalMarks,
+        percentage,
+        questionReports: finalReports,
+        overallAdvice,
+        emailStatus,
+        emailSentAt,
+        gradedBy,
+      };
+
+      if (wantsStream) {
+        sendSse({ type: 'result', data: resultPayload });
+        res.end();
+      } else {
+        res.json(resultPayload);
+      }
+    } catch (err) {
+      console.error('Grade scanned text error:', err);
+      const msg = err instanceof Error ? err.message : 'Grading failed.';
+      if (wantsStream && res.headersSent) {
+        sendSse({ type: 'error', error: msg });
+        res.end();
+      } else {
+        res.status(500).json({ error: msg });
+      }
     }
   });
 
@@ -1237,7 +1925,6 @@ Return JSON matching the exact schema:
       }
 
       const idealAnswers = decryptJson<IdealAnswerItem[]>(body.encryptedAnswerKey);
-      const ai = createGenAIClient();
 
       const imageParts = body.pages.map((dataUrl) => {
         const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
@@ -1299,7 +1986,7 @@ Rules (be concise and accurate so evaluation is fast):
         },
       };
 
-      const aiTargets = buildAttemptTargets(aiTarget);
+      const aiTargets = buildAttemptTargets(aiTarget, 0);
 
       let lastErr: unknown = null;
       let parsed: {
@@ -1323,6 +2010,7 @@ Rules (be concise and accurate so evaluation is fast):
       try {
         for (let tIdx = 0; tIdx < aiTargets.length && !parsed; tIdx++) {
           const currentTarget = aiTargets[tIdx];
+          const ai = createGenAIClient(currentTarget.apiKey);
           if (tIdx > 0 && wantsStream) {
             sendSse({
               type: 'stage',
@@ -1359,7 +2047,7 @@ Rules (be concise and accurate so evaluation is fast):
                     }
                   }
                 }
-                parsed = JSON.parse((rawText || '{}').trim());
+                parsed = extractJsonObject((rawText || '{}').trim());
               } else {
                 const response = await ai.models.generateContent({
                   model: currentTarget.model,
@@ -1369,14 +2057,14 @@ Rules (be concise and accurate so evaluation is fast):
                   config: requestConfig,
                 });
                 const rawText = (response.text ?? '{}').trim();
-                parsed = JSON.parse(rawText);
+                parsed = extractJsonObject(rawText);
               }
               break;
             } catch (err) {
               lastErr = err;
-              if (currentTarget.model === 'gemini-4-hydrogen' && isDailyQuotaExhaustedError(err)) {
-                hydrogenQuotaBlockedUntil = Date.now() + 15 * 60_000;
-                break; // Switch immediately to backup high-quota model
+              if (isDailyQuotaExhaustedError(err)) {
+                markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
+                break; // Switch immediately to next key or backup model
               }
               if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
                 break;
@@ -1534,7 +2222,6 @@ Rules (be concise and accurate so evaluation is fast):
       const aiPreset = normalizeThinkingPreset(body.thinkingLevel, fallbackLevel);
       const aiTarget = resolveAiThinkingTarget(aiPreset);
 
-      const ai = createGenAIClient();
       const imageParts = body.images.map((dataUrl) => {
         const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
         const mimeType = match ? match[1] : 'image/jpeg';
@@ -1562,7 +2249,7 @@ Instructions:
 5. Avoid starting lines inside an ideal answer with "1." or "2." (use bullet "-" or "Step 1:" instead) so each question/answer stays a clean single block.
 6. Return JSON matching the exact schema.`;
 
-      const extractTargets = buildAttemptTargets(aiTarget);
+      const extractTargets = buildAttemptTargets(aiTarget, 0);
 
       let lastErr: unknown = null;
       let parsed: {
@@ -1575,6 +2262,7 @@ Instructions:
 
       for (const currentTarget of extractTargets) {
         if (parsed) break;
+        const ai = createGenAIClient(currentTarget.apiKey);
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const response = await ai.models.generateContent({
@@ -1607,12 +2295,12 @@ Instructions:
             });
 
             const rawText = (response.text ?? '{}').trim();
-            parsed = JSON.parse(rawText);
+            parsed = extractJsonObject(rawText);
             break;
           } catch (err) {
             lastErr = err;
-            if (currentTarget.model === 'gemini-4-hydrogen' && isDailyQuotaExhaustedError(err)) {
-              hydrogenQuotaBlockedUntil = Date.now() + 15 * 60_000;
+            if (isDailyQuotaExhaustedError(err)) {
+              markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
               break;
             }
             if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
