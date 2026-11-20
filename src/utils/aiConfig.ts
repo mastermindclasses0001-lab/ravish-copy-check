@@ -11,7 +11,7 @@ import type { AiThinkingPreset, AppAiConfig } from '../types';
 
 export const DEFAULT_AI_CONFIG: AppAiConfig = {
   settingId: 'aiConfig',
-  studentLevel: 'LOW',
+  studentLevel: 'MINIMAL',
   teacherLevel: 'LOW',
   adminLevel: 'LOW',
 };
@@ -26,10 +26,17 @@ export interface AiLevelOption {
 
 export const AI_THINKING_OPTIONS: AiLevelOption[] = [
   {
+    value: 'MINIMAL',
+    shortLabel: 'MINIMAL (Super Fast · Recommended)',
+    title: 'MINIMAL — Super Fast Flash Lite',
+    description: 'Sabse tez (3–6 sec) copy scan aur high free quota — Student copy upload ke liye best.',
+    engineLabel: 'Gemini 3.1 Flash Lite · MINIMAL',
+  },
+  {
     value: 'LOW',
-    shortLabel: 'LOW (Fast · Hydrogen + Auto Backup)',
-    title: 'LOW — Fast Hydrogen',
-    description: 'Hydrogen (Free Tier ~20 req/day; limit bharne par automatically Flash Lite par switch ho jata hai).',
+    shortLabel: 'LOW (Fast · Hydrogen + Flash Lite)',
+    title: 'LOW — Fast Hybrid',
+    description: 'Copy scan fast Flash Lite par + Book Extraction Gemini 4 Hydrogen par (Auto Backup enabled).',
     engineLabel: 'Gemini 4 Hydrogen · LOW (Auto Backup)',
   },
   {
@@ -53,13 +60,6 @@ export const AI_THINKING_OPTIONS: AiLevelOption[] = [
     description: 'Sabse zyada dimaag (complex numericals / tricky book exercises).',
     engineLabel: 'Gemini 4 Hydrogen · XHIGH',
   },
-  {
-    value: 'MINIMAL',
-    shortLabel: 'MINIMAL (High-Quota Flash Lite · Free Batch)',
-    title: 'MINIMAL — High-Quota Flash Lite',
-    description: 'Free API Key par bade student batches (50–500 copies/day) ke liye best — Hydrogen 20/day limit se bachta hai.',
-    engineLabel: 'Gemini 3.1 Flash Lite · MINIMAL',
-  },
 ];
 
 export function normalizePreset(val: unknown, fallback: AiThinkingPreset = 'LOW'): AiThinkingPreset {
@@ -80,7 +80,7 @@ export async function fetchAiConfig(): Promise<AppAiConfig> {
     const raw = snap.data() as Partial<AppAiConfig>;
     return {
       settingId: 'aiConfig',
-      studentLevel: normalizePreset(raw.studentLevel, 'LOW'),
+      studentLevel: normalizePreset(raw.studentLevel, 'MINIMAL'),
       teacherLevel: normalizePreset(raw.teacherLevel, 'LOW'),
       adminLevel: normalizePreset(raw.adminLevel, 'LOW'),
       updatedByUid: raw.updatedByUid,
@@ -102,7 +102,7 @@ export function subscribeAiConfig(onUpdate: (cfg: AppAiConfig) => void): Unsubsc
       const raw = snap.data() as Partial<AppAiConfig>;
       onUpdate({
         settingId: 'aiConfig',
-        studentLevel: normalizePreset(raw.studentLevel, 'LOW'),
+        studentLevel: normalizePreset(raw.studentLevel, 'MINIMAL'),
         teacherLevel: normalizePreset(raw.teacherLevel, 'LOW'),
         adminLevel: normalizePreset(raw.adminLevel, 'LOW'),
         updatedByUid: raw.updatedByUid,
@@ -125,7 +125,7 @@ export async function saveAiConfig(
 ): Promise<AppAiConfig> {
   const payload = {
     settingId: 'aiConfig' as const,
-    studentLevel: normalizePreset(next.studentLevel, 'LOW'),
+    studentLevel: normalizePreset(next.studentLevel, 'MINIMAL'),
     teacherLevel: normalizePreset(next.teacherLevel, 'LOW'),
     adminLevel: normalizePreset(next.adminLevel, 'LOW'),
     updatedByUid: adminUid,

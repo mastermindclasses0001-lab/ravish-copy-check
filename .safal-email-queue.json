@@ -1,0 +1,31 @@
+[
+  {
+    "submissionId": "diag_sub_local",
+    "testId": "diag_t1",
+    "testTitle": "Diag",
+    "subject": "Science",
+    "targetClass": "Class 10",
+    "expiryTime": "2026-12-31T23:59:00.000Z",
+    "studentName": "Test",
+    "studentSchool": "Test",
+    "studentEmail": "test@example.com",
+    "studentMobile": "9876543210",
+    "guardianMobile": "9876543211",
+    "obtainedMarks": 5,
+    "totalMarks": 5,
+    "percentage": 100,
+    "questionReports": [
+      {
+        "qNo": 1,
+        "questionText": "What is water?",
+        "studentAnswer": "Water is H2O.",
+        "marksObtained": 5,
+        "maxMarks": 5,
+        "causeOfDeduction": "No deduction — accurate and complete answer",
+        "idealAnswer": "Water is H2O."
+      }
+    ],
+    "overallAdvice": "Your answer is precise and scientifically accurate. Continue maintaining this clarity in your explanations. Keep up the good work.",
+    "sent": false
+  }
+]

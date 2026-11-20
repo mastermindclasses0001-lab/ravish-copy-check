@@ -399,9 +399,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
   const captureFromVideo = () => {
     if (!videoRef.current || capturedPages.length >= 20) return;
     const compressed = captureVideoFrameAsDataUrl(videoRef.current, {
-      maxDim: 900,
-      quality: 0.62,
-      maxChars: 115_000,
+      maxDim: 1080,
+      quality: 0.65,
+      maxChars: 125_000,
     });
     if (compressed) {
       setCapturedPages((prev) => [...prev.slice(0, 19), compressed]);
@@ -423,9 +423,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
       const valid = await compressImageFilesInBatches(
         selected,
         {
-          maxDim: 900,
-          quality: 0.62,
-          maxChars: 115_000,
+          maxDim: 1080,
+          quality: 0.65,
+          maxChars: 125_000,
         },
         (done, total) => {
           setPhotoProgressText(`Optimizing Photos (${done}/${total})...`);
@@ -435,6 +435,8 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
       if (valid.length > 0) {
         setCapturedPages((prev) => [...prev, ...valid].slice(0, 20));
         setScanCompleted(false);
+      } else {
+        setSubmitError('Selected photo read nahi ho paya — kripya camera se saaf JPG/PNG photo len.');
       }
     } finally {
       setProcessingPhotos(false);

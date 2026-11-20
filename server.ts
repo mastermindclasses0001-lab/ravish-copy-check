@@ -156,6 +156,18 @@ function formatFriendlyGeminiError(err: unknown): string {
   return raw.slice(0, 240);
 }
 
+function isTimedOutError(err: unknown): boolean {
+  const name = err instanceof Error ? err.name.toUpperCase() : '';
+  const msg = getRawErrorText(err).toUpperCase();
+  return (
+    name === 'ABORTERROR' ||
+    name === 'TIMEOUTERROR' ||
+    msg.includes('TIMEOUT') ||
+    msg.includes('ABORTED DUE TO TIMEOUT') ||
+    msg.includes('DEADLINE_EXCEEDED')
+  );
+}
+
 function isRetryableGeminiError(err: unknown): boolean {
   const msg = getRawErrorText(err).toUpperCase();
   if (
@@ -171,8 +183,8 @@ function isRetryableGeminiError(err: unknown): boolean {
   ) {
     return false;
   }
-  // Do not spin retries on a hard daily free-tier cap; let fallback model run immediately
-  if (isDailyQuotaExhaustedError(err)) {
+  // Do not spin retries on a hard daily free-tier cap or model timeout; move to next key/model immediately
+  if (isDailyQuotaExhaustedError(err) || isTimedOutError(err)) {
     return false;
   }
   return (
@@ -183,7 +195,6 @@ function isRetryableGeminiError(err: unknown): boolean {
     msg.includes('504') ||
     msg.includes('RESOURCE_EXHAUSTED') ||
     msg.includes('UNAVAILABLE') ||
-    msg.includes('DEADLINE_EXCEEDED') ||
     msg.includes('ETIMEDOUT') ||
     msg.includes('ECONNRESET') ||
     msg.includes('FETCH FAILED')
@@ -258,7 +269,7 @@ const serverAiConfig: {
   teacherLevel: AiThinkingPreset;
   adminLevel: AiThinkingPreset;
 } = {
-  studentLevel: 'LOW',
+  studentLevel: 'MINIMAL',
   teacherLevel: 'LOW',
   adminLevel: 'LOW',
 };
@@ -1223,6 +1234,7 @@ Return JSON matching the exact schema:
               },
               config: {
                 thinkingConfig: { thinkingLevel: target.thinkingLevel },
+                abortSignal: AbortSignal.timeout(15_000),
                 responseMimeType: 'application/json',
                 responseSchema: {
                   type: Type.OBJECT,
@@ -1314,7 +1326,10 @@ Return JSON matching the exact schema:
       }
 
       const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
-      const aiTarget = resolveAiThinkingTarget(aiPreset);
+      // Step 1 OCR only reads handwriting into text: MINIMAL/LOW use ultra-fast Flash Lite (~3-6s vs 45s+ on Hydrogen)
+      const effectiveOcrPreset: AiThinkingPreset =
+        aiPreset === 'MINIMAL' || aiPreset === 'LOW' ? 'MINIMAL' : aiPreset;
+      const aiTarget = resolveAiThinkingTarget(effectiveOcrPreset);
 
       const totalPages = body.pages.length;
       const chunkCount = Math.min(4, totalPages);
@@ -1383,17 +1398,15 @@ Return JSON matching the exact schema:
               .map((_, idx) => `Image ${idx + 1} = Page ${chunk.startPageNum + idx}`)
               .join(', ');
 
-            const scanPrompt = `You are a high-accuracy handwritten answer copy OCR scanner for Safal Academy Live.
+            const scanPrompt = `You are a fast handwritten copy OCR scanner for Safal Academy Live.
 Subject: ${body.subject || 'School Exam'} | Test: ${body.testTitle || 'Student Copy'}
 Images provided in order: ${pageLabelList}.
 
 Instructions:
-1. Transcribe EVERY handwritten word, question number (Q1, Q2, Ans 1, etc.), Hindi/Devanagari script, English text, mathematical equations, formulas, steps, and diagram labels visible on each page.
-2. Keep the student's wording completely faithful — DO NOT correct mistakes, invent missing answers, or solve unanswered questions.
-3. Preserve question numbers and clean line breaks so the student can verify their copy easily.
-4. If a diagram/figure is drawn, mention it briefly in brackets like [Diagram: triangle ABC with angle B=90].
-5. If a page is blank or illegible, state "(Page blank or unclear)".
-6. Return JSON matching the schema with pageNumber from ${chunk.startPageNum} to ${endPageNum}.`;
+1. Transcribe ALL handwritten or printed words, question numbers (Q1, Q2, etc.), Hindi/Devanagari script, English text, math equations, and labels visible on each page — even if the page only has 1 to 5 words.
+2. Copy faithfully as written; do NOT invent or correct answers.
+3. If a diagram is drawn, note briefly e.g. [Diagram]. If truly blank, put "(Page blank)".
+4. Return JSON with pageNumber ${chunk.startPageNum} to ${endPageNum}.`;
 
             let lastErr: unknown = null;
             let parsedChunk: { pages?: Array<{ pageNumber: number; extractedText: string }> } | null = null;
@@ -1401,6 +1414,7 @@ Instructions:
             for (const currentTarget of targets) {
               if (parsedChunk) break;
               const ai = createGenAIClient(currentTarget.apiKey);
+              const callTimeoutMs = currentTarget.model === 'gemini-4-hydrogen' ? 14_000 : 20_000;
               for (let attempt = 0; attempt < 2; attempt++) {
                 try {
                   const response = await ai.models.generateContent({
@@ -1410,6 +1424,7 @@ Instructions:
                     },
                     config: {
                       thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+                      abortSignal: AbortSignal.timeout(callTimeoutMs),
                       responseMimeType: 'application/json',
                       responseSchema: {
                         type: Type.OBJECT,
@@ -1446,7 +1461,12 @@ Instructions:
                     markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
                     break;
                   }
-                  if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+                  if (
+                    isTimedOutError(err) ||
+                    isQuotaOrRateLimitError(err) ||
+                    !isRetryableGeminiError(err) ||
+                    attempt >= 1
+                  ) {
                     break;
                   }
                   await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
@@ -1630,6 +1650,7 @@ Rules:
 
       let parsed: ParsedGrade | null = null;
       let gradedBy: 'groq' | 'gemini' = 'gemini';
+      let groqFallbackReason = '';
       let lastErr: unknown = null;
 
       const heartbeat = wantsStream
@@ -1652,6 +1673,7 @@ Rules:
                 headers: {
                   Authorization: `Bearer ${groqApiKey}`,
                   'Content-Type': 'application/json',
+                  'User-Agent': 'SafalAcademyLive/1.0',
                 },
                 body: JSON.stringify({
                   model: groqModel,
@@ -1667,12 +1689,12 @@ Rules:
                     { role: 'user', content: promptText },
                   ],
                 }),
-                signal: AbortSignal.timeout(45_000),
+                signal: AbortSignal.timeout(20_000),
               });
 
               const groqRaw = await groqResp.text();
               if (!groqResp.ok) {
-                throw new Error(`Groq HTTP ${groqResp.status}: ${groqRaw.slice(0, 200)}`);
+                throw new Error(`Groq HTTP ${groqResp.status}: ${groqRaw.slice(0, 140)}`);
               }
 
               const groqJson = JSON.parse(groqRaw) as {
@@ -1687,7 +1709,12 @@ Rules:
               }
             } catch (groqErr) {
               lastErr = groqErr;
-              console.warn(`Groq (${groqModel}) check failed, continuing fallback:`, groqErr);
+              groqFallbackReason =
+                groqErr instanceof Error ? groqErr.message.slice(0, 140) : String(groqErr).slice(0, 140);
+              console.warn(`Groq (${groqModel}) check failed, continuing fallback:`, groqFallbackReason);
+              if (groqFallbackReason.includes('HTTP 401') || groqFallbackReason.includes('HTTP 403')) {
+                break; // No point retrying 2nd Groq model with an unauthorized key
+              }
             }
           }
         }
@@ -1697,16 +1724,19 @@ Rules:
           if (wantsStream && groqApiKey) {
             sendSse({
               type: 'stage',
-              message: 'Switching to Gemini backup for final checking...',
+              message: `Switching to Gemini backup (${groqFallbackReason || 'Groq unavailable'})...`,
             });
           }
           const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
-          const aiTarget = resolveAiThinkingTarget(aiPreset);
+          const effectiveGradePreset: AiThinkingPreset =
+            aiPreset === 'MINIMAL' || aiPreset === 'LOW' ? 'MINIMAL' : aiPreset;
+          const aiTarget = resolveAiThinkingTarget(effectiveGradePreset);
           const aiTargets = buildAttemptTargets(aiTarget, 0);
 
           for (const currentTarget of aiTargets) {
             if (parsed) break;
             const ai = createGenAIClient(currentTarget.apiKey);
+            const callTimeoutMs = currentTarget.model === 'gemini-4-hydrogen' ? 16_000 : 20_000;
             for (let attempt = 0; attempt < 2; attempt++) {
               try {
                 const response = await ai.models.generateContent({
@@ -1714,6 +1744,7 @@ Rules:
                   contents: promptText,
                   config: {
                     thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+                    abortSignal: AbortSignal.timeout(callTimeoutMs),
                     responseMimeType: 'application/json',
                     responseSchema: {
                       type: Type.OBJECT,
@@ -1749,7 +1780,12 @@ Rules:
                   markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
                   break;
                 }
-                if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+                if (
+                  isTimedOutError(err) ||
+                  isQuotaOrRateLimitError(err) ||
+                  !isRetryableGeminiError(err) ||
+                  attempt >= 1
+                ) {
                   break;
                 }
                 await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
@@ -1847,6 +1883,7 @@ Rules:
         emailStatus,
         emailSentAt,
         gradedBy,
+        ...(groqFallbackReason ? { groqFallbackReason } : {}),
       };
 
       if (wantsStream) {
@@ -2023,6 +2060,7 @@ Rules (be concise and accurate so evaluation is fast):
               const requestConfig = {
                 ...schemaConfig,
                 thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+                abortSignal: AbortSignal.timeout(25_000),
               };
               if (wantsStream) {
                 let rawText = '';
@@ -2066,7 +2104,12 @@ Rules (be concise and accurate so evaluation is fast):
                 markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
                 break; // Switch immediately to next key or backup model
               }
-              if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+              if (
+                isTimedOutError(err) ||
+                isQuotaOrRateLimitError(err) ||
+                !isRetryableGeminiError(err) ||
+                attempt >= 1
+              ) {
                 break;
               }
               if (wantsStream) {
@@ -2272,6 +2315,7 @@ Instructions:
               },
               config: {
                 thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
+                abortSignal: AbortSignal.timeout(22_000),
                 responseMimeType: 'application/json',
                 responseSchema: {
                   type: Type.OBJECT,
@@ -2303,7 +2347,12 @@ Instructions:
               markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
               break;
             }
-            if (isQuotaOrRateLimitError(err) || !isRetryableGeminiError(err) || attempt >= 1) {
+            if (
+              isTimedOutError(err) ||
+              isQuotaOrRateLimitError(err) ||
+              !isRetryableGeminiError(err) ||
+              attempt >= 1
+            ) {
               break;
             }
             await new Promise((resolve) => setTimeout(resolve, 450 * Math.pow(2, attempt)));
