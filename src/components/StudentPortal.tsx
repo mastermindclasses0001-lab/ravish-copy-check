@@ -52,7 +52,7 @@ import {
   compressImageFile,
   compressImageFilesInBatches,
 } from '../utils/imageCompress';
-import { parseJsonResponse } from '../utils/safeFetch';
+import { parseJsonResponse, toFriendlyUserMessage } from '../utils/safeFetch';
 import { syncTestTopperOnSubmit } from '../utils/topperSync';
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { ReportCardModal } from './ReportCardModal';
@@ -533,7 +533,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
       await acceptSimpleSelfie(compressed);
     } catch (err) {
       setSelfieError(
-        err instanceof Error ? err.message : 'Photo process nahi ho paya. Dubara selfie len.'
+        toFriendlyUserMessage(err, 'Photo process nahi ho paya. Dubara selfie len.')
       );
     }
   };
@@ -629,7 +629,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
       setProfile(payload);
       setEditingProfile(false);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Unable to save student profile.');
+      setFormError(toFriendlyUserMessage(err, 'Profile save nahi ho paya. Kripya dubara try karen.'));
     } finally {
       setAuthBusy(false);
     }
@@ -641,7 +641,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
     try {
       await signInWithGoogle();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Google Sign-In failed.');
+      setFormError(toFriendlyUserMessage(err, 'Google Sign-In complete nahi ho paya. Dubara try karen.'));
     } finally {
       setAuthBusy(false);
     }
@@ -699,10 +699,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
     }
 
     setScanningCopy(true);
-    const chunkPreviewCount = Math.min(4, capturedPages.length);
-    setScanStage(
-      `Scanning ${capturedPages.length} page(s) across ${chunkPreviewCount} Gemini worker(s)...`
-    );
+    setScanStage(`Scanning ${capturedPages.length} page(s) live...`);
     setSubmitError('');
     setPasteBlockedNotice('');
 
@@ -728,7 +725,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
         });
       } catch (fetchErr) {
         if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-          throw new Error('Scan timed out (120s). Please tap Scan Answer Copy again.');
+          throw new Error('Scan me thoda zyada samay lag gaya. Kripya ek baar dubara Scan dabayen.');
         }
         throw fetchErr;
       }
@@ -804,7 +801,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
       setScannedCopyText(scanData.scannedText);
       setScanCompleted(true);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Copy scan failed.');
+      setSubmitError(toFriendlyUserMessage(err, 'Copy scan nahi ho paya. Kripya dubara try karen.'));
     } finally {
       setScanningCopy(false);
       setScanStage('');
@@ -864,7 +861,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
         });
       } catch (fetchErr) {
         if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-          throw new Error('Server took too long to respond (120s). Please tap Final Submit again.');
+          throw new Error('Copy check karne me thoda zyada samay lag gaya. Kripya ek baar dubara Final Submit dabayen.');
         }
         throw fetchErr;
       }
@@ -1009,7 +1006,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
       setLastSubmitted(submissionDoc);
       setExamStep('thankyou');
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Submission failed.');
+      setSubmitError(toFriendlyUserMessage(err, 'Copy submit nahi ho payi. Kripya dubara try karen.'));
     } finally {
       setSubmittingCopy(false);
       setSubmitStage('');

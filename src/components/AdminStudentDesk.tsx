@@ -43,7 +43,7 @@ import {
   sanitizeIndianMobileInput,
   validateIndianMobile,
 } from '../utils/indianMobile';
-import { parseJsonResponse } from '../utils/safeFetch';
+import { parseJsonResponse, toFriendlyUserMessage } from '../utils/safeFetch';
 import { syncTestTopperOnSubmit } from '../utils/topperSync';
 
 interface AdminStudentDeskProps {
@@ -261,7 +261,7 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
       await acceptSelfieImage(compressed);
     } catch (err) {
       setSelfieError(
-        err instanceof Error ? err.message : 'Photo read nahi ho paya — dubara len.'
+        toFriendlyUserMessage(err, 'Photo read nahi ho paya — dubara len.')
       );
     }
   };
@@ -366,7 +366,7 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
       setSelfieVerified(false);
     } catch (err) {
       setRegisterError(
-        err instanceof Error ? err.message : 'Student register nahi ho paya.'
+        toFriendlyUserMessage(err, 'Student register nahi ho paya. Kripya dubara try karen.')
       );
     } finally {
       setRegisterBusy(false);
@@ -506,10 +506,7 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
     }
 
     setScanningCopy(true);
-    const chunkPreviewCount = Math.min(4, capturedPages.length);
-    setScanStage(
-      `Scanning ${capturedPages.length} page(s) across ${chunkPreviewCount} Gemini worker(s)...`
-    );
+    setScanStage(`Scanning ${capturedPages.length} page(s) live...`);
     setSubmitError('');
     setPasteBlockedNotice('');
 
@@ -598,9 +595,9 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
       setScanCompleted(true);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
-        setSubmitError('Scan timed out (120s). Please tap Scan Answer Copy again.');
+        setSubmitError('Scan me thoda zyada samay lag gaya. Kripya ek baar dubara Scan dabayen.');
       } else {
-        setSubmitError(err instanceof Error ? err.message : 'Copy scan failed.');
+        setSubmitError(toFriendlyUserMessage(err, 'Copy scan nahi ho paya. Kripya dubara try karen.'));
       }
     } finally {
       window.clearTimeout(timeoutId);
@@ -625,7 +622,7 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
     }
 
     setSubmittingCopy(true);
-    setSubmitStage('Groq/AI se copy check ho rahi hai...');
+    setSubmitStage('Copy check ho rahi hai...');
     setSubmitError('');
 
     const controller = new AbortController();
@@ -807,9 +804,9 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
       setScanCompleted(false);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
-        setSubmitError('Submission timed out (120s). Please tap Final Submit again.');
+        setSubmitError('Copy check karne me thoda zyada samay lag gaya. Kripya ek baar dubara Final Submit dabayen.');
       } else {
-        setSubmitError(err instanceof Error ? err.message : 'Submission failed.');
+        setSubmitError(toFriendlyUserMessage(err, 'Copy submit nahi ho payi. Kripya dubara try karen.'));
       }
     } finally {
       window.clearTimeout(timeoutId);

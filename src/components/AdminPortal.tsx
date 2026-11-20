@@ -62,7 +62,7 @@ import {
   downloadClassRankingPdf,
   downloadQuestionPaperPdf,
 } from '../utils/pdfGenerator';
-import { parseJsonResponse } from '../utils/safeFetch';
+import { parseJsonResponse, toFriendlyUserMessage } from '../utils/safeFetch';
 import { syncAdminTestToppers } from '../utils/topperSync';
 import { AdminStudentDesk } from './AdminStudentDesk';
 import { ConfirmModal } from './ConfirmModal';
@@ -270,7 +270,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       );
     } catch (err) {
       setAiConfigNotice(
-        err instanceof Error ? `Save failed: ${err.message}` : 'Unable to save AI settings.'
+        toFriendlyUserMessage(err, 'AI settings abhi save nahi ho payin. Kripya dubara try karen.')
       );
     } finally {
       setSavingAiConfig(false);
@@ -353,7 +353,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       setAdminUnlocked(true);
       setPasswordInput('');
     } catch (err) {
-      setLoginError(err instanceof Error ? err.message : 'Admin authentication failed.');
+      setLoginError(toFriendlyUserMessage(err, 'Admin login abhi complete nahi ho paya. Dubara try karen.'));
     } finally {
       setVerifying(false);
     }
@@ -392,7 +392,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       setAdminUnlocked(true);
       setPasswordInput('');
     } catch (err) {
-      setLoginError(err instanceof Error ? err.message : 'Admin authentication failed.');
+      setLoginError(toFriendlyUserMessage(err, 'Admin login abhi complete nahi ho paya. Dubara try karen.'));
     } finally {
       setVerifying(false);
     }
@@ -481,7 +481,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       setTeacherUsername('');
       setTeacherPassword('');
     } catch (err) {
-      setTeacherFormError(err instanceof Error ? err.message : 'Unable to add teacher.');
+      setTeacherFormError(toFriendlyUserMessage(err, 'Teacher add nahi ho paya. Kripya dubara try karen.'));
     } finally {
       setAddingTeacher(false);
     }
@@ -542,9 +542,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
             }
           : prev
       );
-      setEmailActionNotice(data.ok ? data.message || 'Gmail SMTP verified!' : data.error || 'SMTP failed.');
+      setEmailActionNotice(
+        data.ok
+          ? data.message || 'Email service verified & ready!'
+          : toFriendlyUserMessage(data.error, 'Email verify nahi ho payi. Kripya thodi der baad check karen.')
+      );
     } catch (err) {
-      setEmailActionNotice(err instanceof Error ? err.message : 'SMTP check failed.');
+      setEmailActionNotice(toFriendlyUserMessage(err, 'Email check abhi fail ho gaya. Dubara try karen.'));
     } finally {
       setTestingSmtp(false);
     }
@@ -594,7 +598,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       setEmailActionNotice(
         sentCount > 0
           ? `${sentCount} expired Report Card email(s) sent successfully!`
-          : lastErr || 'Could not send emails — check SMTP configuration.'
+          : toFriendlyUserMessage(lastErr, 'Abhi report email bheja nahi ja saka. Baad me dubara try karen.')
       );
       if (sentCount === 0 && lastErr) {
         try {
@@ -927,7 +931,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                 <span className="font-semibold text-emerald-700">{aiConfigNotice}</span>
               ) : (
                 <span>
-                  Note: LOW/MEDIUM/HIGH/XHIGH Gemini 4 Hydrogen par chalte hain; MINIMAL automatically Flash Lite use karta hai taaki kabhi error na aaye.
+                  Super Fast Mode rozana tez copy checking ke liye best hai; Math aur Science ke mushkil sawalon ke liye Balanced ya Deep mode chunen.
                 </span>
               )}
             </div>
@@ -1057,10 +1061,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                   </div>
                 ) : (
                   <span>
-                    <strong>Auto Email Inactive (SMTP Missing):</strong> Server me abhi{' '}
-                    <code className="font-mono">SMTP_USER</code> aur{' '}
-                    <code className="font-mono">SMTP_PASS</code> active nahi hain. AI Studio Secrets me add karke{' '}
-                    <strong>Apply changes</strong> par click karen.
+                    <strong>Auto Email Abhi Active Nahi Hai:</strong> Server par email settings complete hone ke baad har test expire hone par students ko automatic report card email jayega.
                   </span>
                 )}
                 {emailActionNotice && emailActionNotice !== emailStatusInfo.smtpError && (
@@ -1075,7 +1076,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                   className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer min-h-[40px]"
                 >
                   {testingSmtp ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />}
-                  {emailStatusInfo.smtpVerified ? 'Re-test Gmail SMTP' : 'Test Gmail SMTP'}
+                  {emailStatusInfo.smtpVerified ? 'Re-test Email Service' : 'Test Email Service'}
                 </button>
                 {expiredPendingSubmissions.length > 0 && emailStatusInfo.smtpVerified && (
                   <button

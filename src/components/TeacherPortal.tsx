@@ -29,6 +29,7 @@ import {
 import type { ExamTest, SubmissionReport, TeacherSession } from '../types';
 import { formatDateTimeReadable } from '../utils/indianMobile';
 import { downloadQuestionPaperPdf } from '../utils/pdfGenerator';
+import { toFriendlyUserMessage } from '../utils/safeFetch';
 import { ConfirmModal } from './ConfirmModal';
 import { ReportCardModal } from './ReportCardModal';
 import { TestCreatorPanel } from './TestCreatorPanel';
@@ -195,7 +196,7 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({ user: rawUser }) =
       setSession(nextSession);
       setPassword('');
     } catch (err) {
-      setLoginError(err instanceof Error ? err.message : 'Teacher login failed.');
+      setLoginError(toFriendlyUserMessage(err, 'Teacher login complete nahi ho paya. Dubara try karen.'));
     } finally {
       setLoggingIn(false);
     }

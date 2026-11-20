@@ -5,7 +5,7 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import type { SubmissionReport } from '../types';
 import { formatDateTimeReadable } from '../utils/indianMobile';
 import { downloadStudentReportCardPdf } from '../utils/pdfGenerator';
-import { parseJsonResponse } from '../utils/safeFetch';
+import { parseJsonResponse, toFriendlyUserMessage } from '../utils/safeFetch';
 
 interface ReportCardModalProps {
   submission: SubmissionReport | null;
@@ -72,12 +72,14 @@ export const ReportCardModal: React.FC<ReportCardModalProps> = ({
         setEmailFeedback(`Report Card PDF successfully emailed to ${submission.studentEmail}.`);
       } else {
         setEmailFeedback(
-          data.error ||
-            'Email credentials are not configured yet. You can still download the official Report Card PDF directly.'
+          toFriendlyUserMessage(
+            data.error,
+            'Abhi report email nahi bheja ja saka. Aap seedhe Official Report Card PDF download kar sakte hain.'
+          )
         );
       }
     } catch (err) {
-      setEmailFeedback(err instanceof Error ? err.message : 'Failed to send email.');
+      setEmailFeedback(toFriendlyUserMessage(err, 'Email bhejne me samasya aayi. Kripya Official PDF download kar len.'));
     } finally {
       setSendingEmail(false);
     }

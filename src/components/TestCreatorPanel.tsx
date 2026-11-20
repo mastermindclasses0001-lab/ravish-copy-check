@@ -30,7 +30,7 @@ import {
   saveAiConfig,
   subscribeAiConfig,
 } from '../utils/aiConfig';
-import { parseJsonResponse } from '../utils/safeFetch';
+import { parseJsonResponse, toFriendlyUserMessage } from '../utils/safeFetch';
 
 interface TestCreatorPanelProps {
   creatorUid: string;
@@ -281,7 +281,7 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
         boxesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 100);
     } catch (err) {
-      setExtractError(err instanceof Error ? err.message : 'Extraction failed.');
+      setExtractError(toFriendlyUserMessage(err, 'Photo se prashn read nahi ho paye. Kripya dubara try karen.'));
     } finally {
       setExtracting(false);
     }
@@ -413,7 +413,7 @@ export const TestCreatorPanel: React.FC<TestCreatorPanelProps> = ({
       setExtractSuccessMsg('');
       setScannerOpen(false);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to save test.');
+      setErrorMsg(toFriendlyUserMessage(err, 'Test abhi save nahi ho paya. Kripya dubara try karen.'));
     } finally {
       setSaving(false);
     }

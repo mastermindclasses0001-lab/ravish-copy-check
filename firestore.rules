@@ -444,7 +444,7 @@ service cloud.firestore {
         && isValidTestTopper(incoming())
         && incoming().testId == testId
         && incoming().updatedAt == request.time
-        && incoming().expiresAtMs <= request.time.toMillis() + 43500000
+        && incoming().expiresAtMs <= request.time.toMillis() + 46800000
         && (isAdmin() || incoming().studentUid == request.auth.uid)
         && exists(/databases/$(database)/documents/submissions/$(incoming().submissionId))
         && get(/databases/$(database)/documents/submissions/$(incoming().submissionId)).data.testId == testId
@@ -455,7 +455,7 @@ service cloud.firestore {
         && isValidTestTopper(incoming())
         && incoming().testId == existing().testId
         && incoming().updatedAt == request.time
-        && incoming().expiresAtMs <= request.time.toMillis() + 43500000
+        && incoming().expiresAtMs <= request.time.toMillis() + 46800000
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'submissionId', 'testTitle', 'subject', 'targetClass',
           'studentUid', 'studentName', 'studentClass', 'studentPhotoUrl',

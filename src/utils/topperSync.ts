@@ -46,7 +46,10 @@ function buildTopperDoc(
     studentUid: sub.studentUid,
     studentName: (sub.studentName || 'Student').slice(0, 100),
     studentClass: (studentClass || sub.studentClass || sub.targetClass || 'Class').slice(0, 40),
-    studentPhotoUrl: (studentPhotoUrl || sub.studentPhotoUrl || '').slice(0, 140000),
+    studentPhotoUrl:
+      (studentPhotoUrl || sub.studentPhotoUrl || '').length <= 140000
+        ? studentPhotoUrl || sub.studentPhotoUrl || ''
+        : '',
     obtainedMarks: sub.obtainedMarks,
     totalMarks: sub.totalMarks,
     percentage: sub.percentage,
@@ -82,6 +85,19 @@ export async function syncTestTopperOnSubmit(
     const topperRef = doc(db, 'testToppers', sub.testId);
     const snap = await getDoc(topperRef);
 
+    let photoUrl = profile.selfiePhotoUrl || sub.studentPhotoUrl || '';
+    if (!photoUrl) {
+      try {
+        const stuSnap = await getDoc(doc(db, 'students', sub.studentUid));
+        if (stuSnap.exists()) {
+          const stuData = stuSnap.data() as Partial<StudentProfile>;
+          photoUrl = stuData.selfiePhotoUrl || '';
+        }
+      } catch {
+        // silent
+      }
+    }
+
     if (snap.exists()) {
       const existing = snap.data() as TestTopper;
       if (!beatsExistingTopper(sub, existing, nowMs)) {
@@ -91,7 +107,7 @@ export async function syncTestTopperOnSubmit(
 
     const payload = buildTopperDoc(
       sub,
-      profile.selfiePhotoUrl || sub.studentPhotoUrl || '',
+      photoUrl.length <= 140000 ? photoUrl : '',
       profile.studentClass || sub.studentClass || sub.targetClass,
       nowMs
     );

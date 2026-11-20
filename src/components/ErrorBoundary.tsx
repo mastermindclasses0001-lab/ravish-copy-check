@@ -11,8 +11,11 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
     this.state = { hasError: false, errorMessage: '' };
   }
 
-  static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, errorMessage: error.message || 'An unexpected error occurred.' };
+  static getDerivedStateFromError(): State {
+    return {
+      hasError: true,
+      errorMessage: 'Kuch takniki samasya aa gayi hai. Kripya page ko reload karen.',
+    };
   }
 
   render() {

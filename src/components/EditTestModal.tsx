@@ -8,7 +8,7 @@ import {
   SUBJECT_OPTIONS,
   toLocalDateTimeInputValue,
 } from '../utils/indianMobile';
-import { parseJsonResponse } from '../utils/safeFetch';
+import { parseJsonResponse, toFriendlyUserMessage } from '../utils/safeFetch';
 
 interface EditTestModalProps {
   test: ExamTest | null;
@@ -235,7 +235,7 @@ export const EditTestModal: React.FC<EditTestModalProps> = ({
       });
       onClose();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to update test.');
+      setErrorMsg(toFriendlyUserMessage(err, 'Test update nahi ho paya. Kripya dubara try karen.'));
     } finally {
       setSaving(false);
     }
