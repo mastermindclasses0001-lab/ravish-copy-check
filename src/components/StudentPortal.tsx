@@ -766,11 +766,14 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
                 const evt = JSON.parse(rawEvent) as {
                   type?: string;
                   message?: string;
+                  text?: string;
                   error?: string;
                   data?: ScanResultPayload;
                 };
                 if (evt.type === 'stage' && evt.message) {
                   setScanStage(evt.message);
+                } else if (evt.type === 'partial' && typeof evt.text === 'string') {
+                  setScannedCopyText(evt.text);
                 } else if (evt.type === 'error') {
                   throw new Error(evt.error || 'Copy scan failed. Please retry.');
                 } else if (evt.type === 'result' && evt.data) {
@@ -1719,7 +1722,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ user: rawUser }) =
                   Dekh len ki aapne jo copy me likha tha wahi sab neeche dikh raha hai. Agar koi shabd ya number galat scan hua ho to keyboard se type karke sudhar len (Paste karna band hai). Uske baad Final Submit dabayen.
                 </p>
 
-                {!scanCompleted && (
+                {!scanCompleted && !scanningCopy && (
                   <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 font-medium">
                     Photos badli gayi hain — kripya upar &quot;Step 1: Scan Answer Copy&quot; button dubara dabayen.
                   </div>

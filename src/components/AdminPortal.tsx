@@ -40,6 +40,7 @@ import {
 } from '../firebase';
 import type {
   AiThinkingPreset,
+  AppAiConfig,
   ExamTest,
   StudentProfile,
   SubmissionReport,
@@ -63,6 +64,7 @@ import {
 } from '../utils/pdfGenerator';
 import { parseJsonResponse } from '../utils/safeFetch';
 import { syncAdminTestToppers } from '../utils/topperSync';
+import { AdminStudentDesk } from './AdminStudentDesk';
 import { ConfirmModal } from './ConfirmModal';
 import { EditTestModal } from './EditTestModal';
 import { ReportCardModal } from './ReportCardModal';
@@ -83,7 +85,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
 
   const activeAdminUid = user?.uid || auth.currentUser?.uid || '';
 
-  const [activeTab, setActiveTab] = useState<'results' | 'create' | 'manage_tests' | 'teachers' | 'students'>('results');
+  const [activeTab, setActiveTab] = useState<
+    'results' | 'student_desk' | 'create' | 'manage_tests' | 'teachers' | 'students'
+  >('results');
+  const [deskPreselectedStudentUid, setDeskPreselectedStudentUid] = useState('');
 
   // Data collections
   const [tests, setTests] = useState<ExamTest[]>([]);
@@ -136,6 +141,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
 
   // Global AI Thinking Level Settings (Student + Teacher + Admin)
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [fullAiConfig, setFullAiConfig] = useState<AppAiConfig>(DEFAULT_AI_CONFIG);
   const [studentAiLevel, setStudentAiLevel] = useState<AiThinkingPreset>(DEFAULT_AI_CONFIG.studentLevel);
   const [teacherAiLevel, setTeacherAiLevel] = useState<AiThinkingPreset>(DEFAULT_AI_CONFIG.teacherLevel);
   const [adminAiLevel, setAdminAiLevel] = useState<AiThinkingPreset>(DEFAULT_AI_CONFIG.adminLevel);
@@ -238,6 +244,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
   useEffect(() => {
     if (!adminUnlocked || !activeAdminUid) return;
     const unsub = subscribeAiConfig((cfg) => {
+      setFullAiConfig(cfg);
       setStudentAiLevel(cfg.studentLevel);
       setTeacherAiLevel(cfg.teacherLevel);
       setAdminAiLevel(cfg.adminLevel);
@@ -956,6 +963,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
         </button>
         <button
           type="button"
+          onClick={() => setActiveTab('student_desk')}
+          className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap min-h-[40px] ${
+            activeTab === 'student_desk' ? 'bg-white text-blue-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Register &amp; Submit Copy
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveTab('create')}
           className={`px-4 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap min-h-[40px] ${
             activeTab === 'create' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
@@ -991,6 +1007,25 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
           Students ({students.length})
         </button>
       </div>
+
+      {/* TAB 1B: Admin Student Registration (With Selfie) & Answer Copy Upload Desk */}
+      {activeTab === 'student_desk' && (
+        <AdminStudentDesk
+          students={students}
+          tests={tests}
+          submissions={submissions}
+          aiConfig={fullAiConfig}
+          preselectedStudentUid={deskPreselectedStudentUid}
+          onStudentCreated={(stu) => setStudents((prev) => [stu, ...prev])}
+          onSubmissionCreated={(sub) =>
+            setSubmissions((prev) => [
+              sub,
+              ...prev.filter((item) => item.submissionId !== sub.submissionId),
+            ])
+          }
+          onViewReport={(sub) => setViewingReport(sub)}
+        />
+      )}
 
       {/* TAB 1: Class Rankings, Final Result PDF, & Individual Checked PDFs */}
       {activeTab === 'results' && (
@@ -1548,11 +1583,21 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
       {/* TAB 4: View & Remove Students */}
       {activeTab === 'students' && (
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
-            <Users className="w-5 h-5 text-blue-900" />
-            <h3 className="text-base font-bold text-slate-900">
-              Registered Students ({students.length})
-            </h3>
+          <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Users className="w-5 h-5 text-blue-900" />
+              <h3 className="text-base font-bold text-slate-900">
+                Registered Students ({students.length})
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('student_desk')}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-blue-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-800 cursor-pointer min-h-[40px]"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              Register Student (With Selfie)
+            </button>
           </div>
           {students.length === 0 ? (
             <div className="p-8 text-center text-sm text-slate-600">
@@ -1605,24 +1650,37 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ user }) => {
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-600">{stu.email}</td>
                       <td className="py-3 px-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setConfirmAction({
-                              title: 'Remove Student?',
-                              message: `Remove "${stu.name}" (${stu.studentClass}) from Safal Academy Live?`,
-                              confirmLabel: 'Remove Student',
-                              run: async () => {
-                                await deleteDoc(doc(db, 'students', stu.uid));
-                                setStudents((prev) => prev.filter((item) => item.uid !== stu.uid));
-                              },
-                            })
-                          }
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          Remove
-                        </button>
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeskPreselectedStudentUid(stu.uid);
+                              setActiveTab('student_desk');
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-800 cursor-pointer"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            Submit Copy
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConfirmAction({
+                                title: 'Remove Student?',
+                                message: `Remove "${stu.name}" (${stu.studentClass}) from Safal Academy Live?`,
+                                confirmLabel: 'Remove Student',
+                                run: async () => {
+                                  await deleteDoc(doc(db, 'students', stu.uid));
+                                  setStudents((prev) => prev.filter((item) => item.uid !== stu.uid));
+                                },
+                              })
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Remove
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

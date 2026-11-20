@@ -50,7 +50,7 @@ service cloud.firestore {
     function isValidStudent(data) {
       return data.keys().hasAll(['uid', 'name', 'school', 'studentClass', 'studentMobile', 'guardianMobile', 'email', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['uid', 'name', 'school', 'studentClass', 'studentMobile', 'guardianMobile', 'email', 'selfiePhotoUrl', 'selfieVerifiedAt', 'createdAt', 'updatedAt'])
-        && data.uid is string && data.uid == request.auth.uid && data.uid.size() <= 128
+        && isValidId(data.uid)
         && data.name is string && data.name.size() >= 2 && data.name.size() <= 100
         && data.school is string && data.school.size() >= 2 && data.school.size() <= 140
         && data.studentClass is string && data.studentClass.size() >= 1 && data.studentClass.size() <= 40
@@ -253,8 +253,10 @@ service cloud.firestore {
       allow get: if isValidId(studentId) && (isOwner(studentId) || isAdmin());
       allow list: if isAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
       allow create: if isValidId(studentId)
-        && isOwner(studentId)
+        && request.auth != null
         && isValidStudent(incoming())
+        && incoming().uid == studentId
+        && (isOwner(studentId) || isAdmin())
         && incoming().selfiePhotoUrl is string && incoming().selfiePhotoUrl.size() >= 30
         && incoming().selfieVerifiedAt is string && incoming().selfieVerifiedAt.size() >= 10
         && incoming().createdAt == request.time
@@ -389,12 +391,12 @@ service cloud.firestore {
       allow get: if isValidId(submissionId) && (isAdmin() || isTeacher() || (isSignedIn() && existing().studentUid == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && (resource.data.studentUid == request.auth.uid || resource.data.testCreatorUid == request.auth.uid));
       allow create: if isValidId(submissionId)
-        && isSignedIn()
+        && request.auth != null
         && isValidSubmission(incoming())
         && incoming().submissionId == submissionId
-        && incoming().studentUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
+        && ((isSignedIn() && incoming().studentUid == request.auth.uid) || isAdmin())
         && exists(/databases/$(database)/documents/tests/$(incoming().testId));
       allow update: if isValidId(submissionId)
         && isValidSubmission(incoming())
@@ -420,11 +422,14 @@ service cloud.firestore {
           );
         allow list: if isAdmin();
         allow create: if isValidId(submissionId) && isValidId(pageId)
-          && isSignedIn()
+          && request.auth != null
           && isValidSubmissionPage(incoming())
           && incoming().createdAt == request.time
           && exists(/databases/$(database)/documents/submissions/$(submissionId))
-          && get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid;
+          && (
+            isAdmin() ||
+            (isSignedIn() && get(/databases/$(database)/documents/submissions/$(submissionId)).data.studentUid == request.auth.uid)
+          );
         allow update: if false;
         allow delete: if isValidId(submissionId) && isValidId(pageId) && isAdmin();
       }

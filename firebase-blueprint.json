@@ -2,7 +2,7 @@
   "entities": {
     "StudentProfile": {
       "title": "Student Profile",
-      "description": "Registered student profile linked to Google Auth UID with Indian mobile validation.",
+      "description": "Registered student profile (self-registered via Google Auth or registered by Admin with selfie) with Indian mobile validation.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },

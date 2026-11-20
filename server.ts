@@ -1325,11 +1325,8 @@ Return JSON matching the exact schema:
         return;
       }
 
-      const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
-      // Step 1 OCR only reads handwriting into text: MINIMAL/LOW use ultra-fast Flash Lite (~3-6s vs 45s+ on Hydrogen)
-      const effectiveOcrPreset: AiThinkingPreset =
-        aiPreset === 'MINIMAL' || aiPreset === 'LOW' ? 'MINIMAL' : aiPreset;
-      const aiTarget = resolveAiThinkingTarget(effectiveOcrPreset);
+      // Step 1 OCR only reads handwriting into text (zero reasoning needed), so always start with ultra-fast Flash Lite MINIMAL
+      const aiTarget = resolveAiThinkingTarget('MINIMAL');
 
       const totalPages = body.pages.length;
       const chunkCount = Math.min(4, totalPages);
@@ -1362,7 +1359,7 @@ Return JSON matching the exact schema:
         res.flushHeaders?.();
         sendSse({
           type: 'stage',
-          message: `Scanning ${totalPages} page(s) in ${chunkCount} parallel part(s) across ${configuredKeys.length} Gemini key(s)...`,
+          message: `Scanning ${totalPages} page(s) live across ${chunkCount} Gemini stream(s)...`,
         });
       }
 
@@ -1374,8 +1371,31 @@ Return JSON matching the exact schema:
           }, 3_000)
         : null;
 
+      const chunkTexts: string[] = new Array(chunkCount).fill('');
+      let lastPartialSentAt = 0;
+      const emitLivePartial = (force = false) => {
+        if (!wantsStream || res.writableEnded) return;
+        const now = Date.now();
+        if (!force && now - lastPartialSentAt < 140) return;
+        lastPartialSentAt = now;
+        const combined = chunks
+          .map((ch, idx) => {
+            const raw = chunkTexts[idx].trim();
+            if (!raw) return '';
+            if (ch.pages.length === 1) {
+              return `--- Page ${ch.startPageNum} ---\n${raw}`;
+            }
+            return raw;
+          })
+          .filter(Boolean)
+          .join('\n\n');
+        if (combined) {
+          sendSse({ type: 'partial', text: combined });
+        }
+      };
+
       let completedChunks = 0;
-      let chunkResults: Array<Array<{ pageNumber: number; extractedText: string }>> = [];
+      let chunkResults: Array<{ chunkIndex: number; formattedText: string }> = [];
 
       try {
         chunkResults = await Promise.all(
@@ -1394,30 +1414,22 @@ Return JSON matching the exact schema:
               };
             });
 
-            const pageLabelList = chunk.pages
-              .map((_, idx) => `Image ${idx + 1} = Page ${chunk.startPageNum + idx}`)
-              .join(', ');
-
-            const scanPrompt = `You are a fast handwritten copy OCR scanner for Safal Academy Live.
-Subject: ${body.subject || 'School Exam'} | Test: ${body.testTitle || 'Student Copy'}
-Images provided in order: ${pageLabelList}.
-
-Instructions:
-1. Transcribe ALL handwritten or printed words, question numbers (Q1, Q2, etc.), Hindi/Devanagari script, English text, math equations, and labels visible on each page — even if the page only has 1 to 5 words.
-2. Copy faithfully as written; do NOT invent or correct answers.
-3. If a diagram is drawn, note briefly e.g. [Diagram]. If truly blank, put "(Page blank)".
-4. Return JSON with pageNumber ${chunk.startPageNum} to ${endPageNum}.`;
+            const scanPrompt =
+              chunk.pages.length === 1
+                ? `Fast OCR scanner (${body.subject || 'Exam'}). Transcribe ALL handwritten/printed text, question numbers (Q1, Q2...), Hindi/English words, and math equations visible in this image faithfully. Even if only 1-5 words are written, output them exactly. Output plain text only (no JSON, no markdown code blocks). If blank write "(Page blank)".`
+                : `Fast OCR scanner (${body.subject || 'Exam'}). Transcribe ALL handwritten/printed text, question numbers, Hindi/English words, and math equations from these ${chunk.pages.length} page images IN ORDER (Page ${chunk.startPageNum} to Page ${endPageNum}). Prefix each page strictly with "--- Page N ---" on its own line. Output plain text only (no JSON, no markdown code blocks).`;
 
             let lastErr: unknown = null;
-            let parsedChunk: { pages?: Array<{ pageNumber: number; extractedText: string }> } | null = null;
+            let finalChunkText = '';
 
             for (const currentTarget of targets) {
-              if (parsedChunk) break;
+              if (finalChunkText) break;
               const ai = createGenAIClient(currentTarget.apiKey);
-              const callTimeoutMs = currentTarget.model === 'gemini-4-hydrogen' ? 14_000 : 20_000;
+              const callTimeoutMs = 12_000;
               for (let attempt = 0; attempt < 2; attempt++) {
+                chunkTexts[chunk.chunkIndex] = '';
                 try {
-                  const response = await ai.models.generateContent({
+                  const stream = await ai.models.generateContentStream({
                     model: currentTarget.model,
                     contents: {
                       parts: [...imageParts, { text: scanPrompt }],
@@ -1425,37 +1437,32 @@ Instructions:
                     config: {
                       thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
                       abortSignal: AbortSignal.timeout(callTimeoutMs),
-                      responseMimeType: 'application/json',
-                      responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                          pages: {
-                            type: Type.ARRAY,
-                            items: {
-                              type: Type.OBJECT,
-                              properties: {
-                                pageNumber: { type: Type.INTEGER },
-                                extractedText: { type: Type.STRING },
-                              },
-                              required: ['pageNumber', 'extractedText'],
-                            },
-                          },
-                        },
-                        required: ['pages'],
-                      },
                     },
                   });
 
-                  const rawText = (response.text ?? '{}').trim();
-                  const candidate = extractJsonObject<{
-                    pages?: Array<{ pageNumber: number; extractedText: string }>;
-                  }>(rawText);
-                  if (candidate && Array.isArray(candidate.pages) && candidate.pages.length > 0) {
-                    parsedChunk = candidate;
+                  let collected = '';
+                  for await (const part of stream) {
+                    const delta = part.text || '';
+                    if (delta) {
+                      collected += delta;
+                      chunkTexts[chunk.chunkIndex] = collected;
+                      emitLivePartial(false);
+                    }
+                  }
+
+                  const cleaned = collected.trim();
+                  if (cleaned) {
+                    finalChunkText =
+                      chunk.pages.length === 1
+                        ? `--- Page ${chunk.startPageNum} ---\n${cleaned.replace(/^---\s*Page\s*\d+\s*---\s*/i, '')}`
+                        : cleaned;
+                    chunkTexts[chunk.chunkIndex] = cleaned;
+                    emitLivePartial(true);
                     break;
                   }
                   lastErr = new Error('Empty OCR output from Gemini.');
                 } catch (err) {
+                  chunkTexts[chunk.chunkIndex] = '';
                   lastErr = err;
                   if (isDailyQuotaExhaustedError(err)) {
                     markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
@@ -1469,12 +1476,12 @@ Instructions:
                   ) {
                     break;
                   }
-                  await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
+                  await new Promise((resolve) => setTimeout(resolve, 300));
                 }
               }
             }
 
-            if (!parsedChunk || !parsedChunk.pages) {
+            if (!finalChunkText) {
               throw lastErr instanceof Error
                 ? lastErr
                 : new Error(formatFriendlyGeminiError(lastErr));
@@ -1488,33 +1495,23 @@ Instructions:
               });
             }
 
-            return chunk.pages.map((_, idx) => {
-              const targetPageNo = chunk.startPageNum + idx;
-              const matched =
-                parsedChunk?.pages?.find((p) => Number(p.pageNumber) === targetPageNo) ||
-                parsedChunk?.pages?.[idx];
-              return {
-                pageNumber: targetPageNo,
-                extractedText: (matched?.extractedText || '').trim(),
-              };
-            });
+            return {
+              chunkIndex: chunk.chunkIndex,
+              formattedText: finalChunkText,
+            };
           })
         );
       } finally {
         if (heartbeat) clearInterval(heartbeat);
       }
 
-      const orderedPages = chunkResults
-        .flat()
-        .sort((a, b) => a.pageNumber - b.pageNumber);
-
-      const scannedText = orderedPages
-        .map((p) => `--- Page ${p.pageNumber} ---\n${p.extractedText || '(No readable text found)'}`)
+      const scannedText = [...chunkResults]
+        .sort((a, b) => a.chunkIndex - b.chunkIndex)
+        .map((c) => c.formattedText)
         .join('\n\n');
 
       const responsePayload = {
         scannedText,
-        pageTexts: orderedPages,
         chunkCount,
         keysConfigured: configuredKeys.length,
       };
