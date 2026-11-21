@@ -1287,6 +1287,47 @@ Return JSON matching the exact schema:
   });
 
   // STEP 1 (Fast 4-Way Parallel Copy Scan): Split N pages evenly across up to 4 Gemini API keys
+  // Bounded short-lived caches to eliminate redundant repeat calls on retries / double-taps
+  const scanChunkCache = new Map<string, { text: string; cachedAt: number }>();
+  const gradeResultCache = new Map<string, { parsed: unknown; cachedAt: number }>();
+
+  const getCachedScanChunk = (key: string): string | null => {
+    const entry = scanChunkCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.cachedAt > 10 * 60_000) {
+      scanChunkCache.delete(key);
+      return null;
+    }
+    return entry.text;
+  };
+
+  const setCachedScanChunk = (key: string, text: string) => {
+    if (scanChunkCache.size >= 60) {
+      const oldestKey = scanChunkCache.keys().next().value;
+      if (oldestKey) scanChunkCache.delete(oldestKey);
+    }
+    scanChunkCache.set(key, { text, cachedAt: Date.now() });
+  };
+
+  const getCachedGradeResult = <T,>(key: string): T | null => {
+    const entry = gradeResultCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.cachedAt > 3 * 60_000) {
+      gradeResultCache.delete(key);
+      return null;
+    }
+    return entry.parsed as T;
+  };
+
+  const setCachedGradeResult = (key: string, parsed: unknown) => {
+    if (gradeResultCache.size >= 50) {
+      const oldestKey = gradeResultCache.keys().next().value;
+      if (oldestKey) gradeResultCache.delete(oldestKey);
+    }
+    gradeResultCache.set(key, { parsed, cachedAt: Date.now() });
+  };
+
+  // STEP 1 (Fast 4-Way Parallel Copy Scan with First-Byte Hedged Failover + Chunk Cache)
   app.post('/api/scan-copy-pages', async (req, res) => {
     const wantsStream =
       req.query.stream === '1' ||
@@ -1316,7 +1357,6 @@ Return JSON matching the exact schema:
         return;
       }
 
-      // Step 1 OCR only reads handwriting into text (zero reasoning needed), so always start with ultra-fast Flash Lite MINIMAL
       const aiTarget = resolveAiThinkingTarget('MINIMAL');
 
       const totalPages = body.pages.length;
@@ -1326,7 +1366,7 @@ Return JSON matching the exact schema:
 
       interface ScanChunk {
         chunkIndex: number;
-        startPageNum: number; // 1-based
+        startPageNum: number;
         pages: string[];
       }
 
@@ -1367,7 +1407,7 @@ Return JSON matching the exact schema:
       const emitLivePartial = (force = false) => {
         if (!wantsStream || res.writableEnded) return;
         const now = Date.now();
-        if (!force && now - lastPartialSentAt < 140) return;
+        if (!force && now - lastPartialSentAt < 120) return;
         lastPartialSentAt = now;
         const combined = chunks
           .map((ch, idx) => {
@@ -1388,12 +1428,95 @@ Return JSON matching the exact schema:
       let completedChunks = 0;
       let chunkResults: Array<{ chunkIndex: number; formattedText: string }> = [];
 
+      const runSingleScanStream = async (
+        chunk: ScanChunk,
+        target: MultiKeyTarget,
+        imageParts: Array<{ inlineData: { mimeType: string; data: string } }>,
+        scanPrompt: string,
+        allowPartialUpdates: boolean,
+        externalAbort?: AbortController
+      ): Promise<string> => {
+        const ai = createGenAIClient(target.apiKey);
+        const controller = externalAbort || new AbortController();
+        let receivedFirstToken = false;
+
+        // First-byte watchdog (9s) & total stream cap (15s) prevent hung sockets without aborting healthy 4-6s scans
+        const firstByteTimer = setTimeout(() => {
+          if (!receivedFirstToken) {
+            controller.abort(new Error('FIRST_BYTE_TIMEOUT'));
+          }
+        }, 9_000);
+        const totalTimer = setTimeout(() => {
+          controller.abort(new Error('STREAM_TIMEOUT'));
+        }, 15_000);
+
+        try {
+          const stream = await ai.models.generateContentStream({
+            model: target.model,
+            contents: { parts: [...imageParts, { text: scanPrompt }] },
+            config: {
+              thinkingConfig: { thinkingLevel: target.thinkingLevel },
+              abortSignal: controller.signal,
+            },
+          });
+
+          let collected = '';
+          for await (const part of stream) {
+            const delta = part.text || '';
+            if (delta) {
+              if (!receivedFirstToken) {
+                receivedFirstToken = true;
+                clearTimeout(firstByteTimer);
+              }
+              collected += delta;
+              if (allowPartialUpdates) {
+                chunkTexts[chunk.chunkIndex] = collected;
+                emitLivePartial(false);
+              }
+            }
+          }
+
+          const cleaned = collected.trim();
+          if (!cleaned) {
+            throw new Error('Empty OCR output.');
+          }
+          return cleaned;
+        } catch (err) {
+          if (isDailyQuotaExhaustedError(err)) {
+            markKeyModelBlocked(target.keyIndex, target.model);
+          }
+          throw err;
+        } finally {
+          clearTimeout(firstByteTimer);
+          clearTimeout(totalTimer);
+        }
+      };
+
       try {
         chunkResults = await Promise.all(
           chunks.map(async (chunk) => {
+            const endPageNum = chunk.startPageNum + chunk.pages.length - 1;
+            const chunkHash = crypto
+              .createHash('sha256')
+              .update(`${body.subject || ''}:${chunk.startPageNum}:${chunk.pages.join('|')}`)
+              .digest('hex');
+
+            const cached = getCachedScanChunk(chunkHash);
+            if (cached) {
+              chunkTexts[chunk.chunkIndex] = cached.replace(/^---\s*Page\s*\d+\s*---\s*/i, '');
+              emitLivePartial(true);
+              completedChunks += 1;
+              if (wantsStream) {
+                sendSse({
+                  type: 'stage',
+                  message: `Scanned part ${completedChunks}/${chunkCount} (Pages ${chunk.startPageNum}-${endPageNum} ready)...`,
+                });
+              }
+              return { chunkIndex: chunk.chunkIndex, formattedText: cached };
+            }
+
             const preferredKeyIdx = chunk.chunkIndex % configuredKeys.length;
             const targets = buildAttemptTargets(aiTarget, preferredKeyIdx);
-            const endPageNum = chunk.startPageNum + chunk.pages.length - 1;
 
             const imageParts = chunk.pages.map((dataUrl) => {
               const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
@@ -1407,76 +1530,104 @@ Return JSON matching the exact schema:
 
             const scanPrompt =
               chunk.pages.length === 1
-                ? `Fast OCR scanner (${body.subject || 'Exam'}). Transcribe ALL handwritten/printed text, question numbers (Q1, Q2...), Hindi/English words, and math equations visible in this image faithfully. Even if only 1-5 words are written, output them exactly. Output plain text only (no JSON, no markdown code blocks). If blank write "(Page blank)".`
-                : `Fast OCR scanner (${body.subject || 'Exam'}). Transcribe ALL handwritten/printed text, question numbers, Hindi/English words, and math equations from these ${chunk.pages.length} page images IN ORDER (Page ${chunk.startPageNum} to Page ${endPageNum}). Prefix each page strictly with "--- Page N ---" on its own line. Output plain text only (no JSON, no markdown code blocks).`;
+                ? `OCR (${body.subject || 'Exam'}). Transcribe all handwritten/printed text, Q-numbers, Hindi/English words, and math equations faithfully. Plain text only (no markdown/JSON). If blank write "(Page blank)".`
+                : `OCR (${body.subject || 'Exam'}). Transcribe all handwritten/printed text, Q-numbers, Hindi/English words, and math equations from these ${chunk.pages.length} images IN ORDER (Page ${chunk.startPageNum} to ${endPageNum}). Start each page with "--- Page N ---". Plain text only.`;
 
             let lastErr: unknown = null;
-            let finalChunkText = '';
+            let cleanedResult = '';
 
-            for (const currentTarget of targets) {
-              if (finalChunkText) break;
-              const ai = createGenAIClient(currentTarget.apiKey);
-              const callTimeoutMs = 12_000;
-              for (let attempt = 0; attempt < 2; attempt++) {
-                chunkTexts[chunk.chunkIndex] = '';
-                try {
-                  const stream = await ai.models.generateContentStream({
-                    model: currentTarget.model,
-                    contents: {
-                      parts: [...imageParts, { text: scanPrompt }],
-                    },
-                    config: {
-                      thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
-                      abortSignal: AbortSignal.timeout(callTimeoutMs),
-                    },
-                  });
+            // Hedged race ONLY when 2+ distinct API keys exist; single-key envs run cleanly sequentially
+            const canHedgeDistinctKeys =
+              targets.length >= 2 && targets[1].keyIndex !== targets[0].keyIndex;
 
-                  let collected = '';
-                  for await (const part of stream) {
-                    const delta = part.text || '';
-                    if (delta) {
-                      collected += delta;
-                      chunkTexts[chunk.chunkIndex] = collected;
-                      emitLivePartial(false);
-                    }
-                  }
+            if (canHedgeDistinctKeys) {
+              const primaryCtrl = new AbortController();
+              const hedgeCtrl = new AbortController();
+              let hedgeTimer: ReturnType<typeof setTimeout> | null = null;
+              let primaryFinished = false;
+              let hedgeStarted = false;
 
-                  const cleaned = collected.trim();
-                  if (cleaned) {
-                    finalChunkText =
-                      chunk.pages.length === 1
-                        ? `--- Page ${chunk.startPageNum} ---\n${cleaned.replace(/^---\s*Page\s*\d+\s*---\s*/i, '')}`
-                        : cleaned;
-                    chunkTexts[chunk.chunkIndex] = cleaned;
-                    emitLivePartial(true);
-                    break;
+              const primaryTask = (async () => {
+                const text = await runSingleScanStream(
+                  chunk,
+                  targets[0],
+                  imageParts,
+                  scanPrompt,
+                  true,
+                  primaryCtrl
+                );
+                primaryFinished = true;
+                hedgeCtrl.abort();
+                return text;
+              })();
+
+              const hedgeTask = new Promise<string>((resolve, reject) => {
+                const startHedge = () => {
+                  if (hedgeStarted) return;
+                  hedgeStarted = true;
+                  if (primaryFinished || hedgeCtrl.signal.aborted) {
+                    reject(new Error('HEDGE_SKIPPED'));
+                    return;
                   }
-                  lastErr = new Error('Empty OCR output from Gemini.');
-                } catch (err) {
-                  chunkTexts[chunk.chunkIndex] = '';
-                  lastErr = err;
-                  if (isDailyQuotaExhaustedError(err)) {
-                    markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
-                    break;
+                  runSingleScanStream(chunk, targets[1], imageParts, scanPrompt, false, hedgeCtrl)
+                    .then((txt) => {
+                      primaryCtrl.abort();
+                      resolve(txt);
+                    })
+                    .catch(reject);
+                };
+                hedgeTimer = setTimeout(startHedge, 3_600);
+                // If primary fails quickly before 3.6s, launch hedge immediately instead of waiting
+                primaryTask.catch(() => {
+                  if (hedgeTimer) {
+                    clearTimeout(hedgeTimer);
+                    hedgeTimer = null;
                   }
-                  if (
-                    isTimedOutError(err) ||
-                    isQuotaOrRateLimitError(err) ||
-                    !isRetryableGeminiError(err) ||
-                    attempt >= 1
-                  ) {
-                    break;
-                  }
-                  await new Promise((resolve) => setTimeout(resolve, 300));
-                }
+                  startHedge();
+                });
+              });
+
+              try {
+                cleanedResult = await Promise.any([primaryTask, hedgeTask]);
+              } catch (raceErr) {
+                lastErr = raceErr;
+              } finally {
+                if (hedgeTimer) clearTimeout(hedgeTimer);
               }
             }
 
-            if (!finalChunkText) {
+            // Sweep remaining targets sequentially (or all targets when running on single key)
+            const startIndex = canHedgeDistinctKeys ? 2 : 0;
+            for (let i = startIndex; i < targets.length && !cleanedResult; i++) {
+              chunkTexts[chunk.chunkIndex] = '';
+              try {
+                cleanedResult = await runSingleScanStream(
+                  chunk,
+                  targets[i],
+                  imageParts,
+                  scanPrompt,
+                  true
+                );
+              } catch (err) {
+                chunkTexts[chunk.chunkIndex] = '';
+                lastErr = err;
+              }
+            }
+
+            if (!cleanedResult) {
               throw lastErr instanceof Error
                 ? lastErr
                 : new Error(formatFriendlyGeminiError(lastErr));
             }
+
+            const formattedText =
+              chunk.pages.length === 1
+                ? `--- Page ${chunk.startPageNum} ---\n${cleanedResult.replace(/^---\s*Page\s*\d+\s*---\s*/i, '')}`
+                : cleanedResult;
+
+            chunkTexts[chunk.chunkIndex] = cleanedResult;
+            emitLivePartial(true);
+            setCachedScanChunk(chunkHash, formattedText);
 
             completedChunks += 1;
             if (wantsStream) {
@@ -1488,7 +1639,7 @@ Return JSON matching the exact schema:
 
             return {
               chunkIndex: chunk.chunkIndex,
-              formattedText: finalChunkText,
+              formattedText,
             };
           })
         );
@@ -1524,7 +1675,7 @@ Return JSON matching the exact schema:
     }
   });
 
-  // STEP 2 (Ultra-Fast Text Grading): Grade reviewed copy text with Groq (fallback to Gemini multi-key)
+  // STEP 2 (Hedged Ultra-Fast Text Grading): Races fast primary engine with instant fallback & result cache
   app.post('/api/grade-scanned-text', async (req, res) => {
     const wantsStream =
       req.query.stream === '1' ||
@@ -1588,40 +1739,27 @@ Return JSON matching the exact schema:
       const rubricLines = body.questions
         .map((q) => {
           const ideal = idealAnswers.find((a) => a.qNo === q.qNo)?.idealAnswer || '';
-          return `Question ${q.qNo} (Max Marks: ${q.marks}):\nQuestion Text: ${q.questionText}\nTeacher Ideal Answer: ${ideal}`;
+          return `Q${q.qNo} (${q.marks}m): ${q.questionText}\nIdeal: ${ideal}`;
         })
-        .join('\n\n---\n\n');
+        .join('\n\n');
 
-      const promptText = `You are a fast, fair academic examiner for Safal Academy Live.
-Evaluate the student's scanned & verified answer copy text (${body.pageCount || 1} page(s)) for:
-Test: ${body.testTitle} (${body.subject}, ${body.targetClass}) | Student: ${body.studentName}
+      const promptText = `Fair academic examiner (${body.subject}, ${body.targetClass}).
+Grade ${body.pageCount || 1} page(s) for ${body.studentName}.
 
-Questions & Teacher Ideal Answers:
+Questions & Ideal Answers:
 ${rubricLines}
 
-Student's Scanned Answer Copy Text:
+Student Copy Text:
 """
 ${cleanedScannedText}
 """
 
 Rules:
-1. Match each written answer carefully to Q1, Q2, etc. (support English, Hindi/Devanagari, math formulas/steps).
-2. For "studentAnswer": give a concise faithful summary/key steps & final answer from the student's scanned text (1-3 short lines; write "Not attempted by student" if missing).
-3. Grade fairly with step-marking against Max Marks; never exceed Max Marks.
-4. For "causeOfDeduction": 1 crisp sentence explaining deduction, or "No deduction — accurate and complete answer" if full marks.
-5. For "overallAdvice": 2-3 concise, practical study sentences.
-6. Return ONLY valid JSON strictly matching this shape:
-{
-  "questionReports": [
-    {
-      "qNo": 1,
-      "studentAnswer": "...",
-      "marksObtained": 0,
-      "causeOfDeduction": "..."
-    }
-  ],
-  "overallAdvice": "..."
-}`;
+- Match Q1, Q2... accurately (Hindi/English/Math). Never exceed Max Marks. Step-mark fairly.
+- "studentAnswer": crisp 1-2 line summary/steps ("Not attempted by student" if missing).
+- "causeOfDeduction": 1 short sentence, or "No deduction — accurate and complete answer" if full marks.
+- "overallAdvice": 2 crisp practical study sentences.
+- Output ONLY valid JSON: {"questionReports":[{"qNo":1,"studentAnswer":"...","marksObtained":0,"causeOfDeduction":"..."}],"overallAdvice":"..."}`;
 
       type ParsedGrade = {
         questionReports: Array<{
@@ -1633,9 +1771,20 @@ Rules:
         overallAdvice: string;
       };
 
-      let parsed: ParsedGrade | null = null;
-      let gradedBy: 'groq' | 'gemini' = 'gemini';
-      let groqFallbackReason = '';
+      const gradeCacheKey = crypto
+        .createHash('sha256')
+        .update(`${body.testId}:${JSON.stringify(body.questions)}:${cleanedScannedText}`)
+        .digest('hex');
+
+      const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
+      const isDeepPreset = aiPreset === 'HIGH' || aiPreset === 'XHIGH';
+      const effectiveGradePreset: AiThinkingPreset =
+        aiPreset === 'MINIMAL' || aiPreset === 'LOW' ? 'MINIMAL' : aiPreset;
+
+      const geminiKeys = getConfiguredGeminiKeys();
+      const dynamicMaxTokens = Math.min(3_200, Math.max(900, body.questions.length * 260));
+
+      let parsed: ParsedGrade | null = getCachedGradeResult<ParsedGrade>(gradeCacheKey);
       let lastErr: unknown = null;
 
       const heartbeat = wantsStream
@@ -1646,138 +1795,195 @@ Rules:
           }, 3_000)
         : null;
 
-      try {
-        // 1) Try Groq API first (ultra-fast active LPU models: gpt-oss-20b ~1000 tps, gpt-oss-120b ~500 tps)
-        if (groqApiKey) {
-          const groqModels = ['openai/gpt-oss-20b', 'openai/gpt-oss-120b'];
-          for (const groqModel of groqModels) {
-            if (parsed) break;
-            try {
-              const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                  Authorization: `Bearer ${groqApiKey}`,
-                  'Content-Type': 'application/json',
-                  'User-Agent': 'SafalAcademyLive/1.0',
-                },
-                body: JSON.stringify({
-                  model: groqModel,
-                  temperature: 0.1,
-                  max_tokens: 4096,
-                  reasoning_effort: 'low',
-                  response_format: { type: 'json_object' },
-                  messages: [
-                    {
-                      role: 'system',
-                      content:
-                        'You are an accurate academic answer sheet examiner. Always output valid JSON only.',
+      const callGroqGrader = async (
+        groqModel: string,
+        signal: AbortSignal
+      ): Promise<ParsedGrade> => {
+        const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${groqApiKey}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'SafalAcademyLive/1.0',
+          },
+          body: JSON.stringify({
+            model: groqModel,
+            temperature: 0.1,
+            max_tokens: dynamicMaxTokens,
+            reasoning_effort: isDeepPreset ? 'medium' : 'low',
+            response_format: { type: 'json_object' },
+            messages: [
+              {
+                role: 'system',
+                content: 'Accurate academic answer sheet examiner. Output valid JSON only.',
+              },
+              { role: 'user', content: promptText },
+            ],
+          }),
+          signal,
+        });
+        const groqRaw = await groqResp.text();
+        if (!groqResp.ok) {
+          throw new Error(`Groq HTTP ${groqResp.status}: ${groqRaw.slice(0, 140)}`);
+        }
+        const groqJson = JSON.parse(groqRaw) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const content = groqJson?.choices?.[0]?.message?.content || '{}';
+        const candidate = extractJsonObject<ParsedGrade>(content);
+        if (!candidate || !Array.isArray(candidate.questionReports)) {
+          throw new Error('Malformed grading JSON output.');
+        }
+        return candidate;
+      };
+
+      const callGeminiGrader = async (
+        target: MultiKeyTarget,
+        signal: AbortSignal
+      ): Promise<ParsedGrade> => {
+        const ai = createGenAIClient(target.apiKey);
+        try {
+          const response = await ai.models.generateContent({
+            model: target.model,
+            contents: promptText,
+            config: {
+              thinkingConfig: { thinkingLevel: target.thinkingLevel },
+              abortSignal: signal,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  questionReports: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        qNo: { type: Type.INTEGER },
+                        studentAnswer: { type: Type.STRING },
+                        marksObtained: { type: Type.NUMBER },
+                        causeOfDeduction: { type: Type.STRING },
+                      },
+                      required: ['qNo', 'studentAnswer', 'marksObtained', 'causeOfDeduction'],
                     },
-                    { role: 'user', content: promptText },
-                  ],
-                }),
-                signal: AbortSignal.timeout(10_000),
-              });
+                  },
+                  overallAdvice: { type: Type.STRING },
+                },
+                required: ['questionReports', 'overallAdvice'],
+              },
+            },
+          });
+          const candidate = extractJsonObject<ParsedGrade>((response.text ?? '{}').trim());
+          if (!candidate || !Array.isArray(candidate.questionReports)) {
+            throw new Error('Malformed grading JSON output.');
+          }
+          return candidate;
+        } catch (err) {
+          if (isDailyQuotaExhaustedError(err)) {
+            markKeyModelBlocked(target.keyIndex, target.model);
+          }
+          throw err;
+        }
+      };
 
-              const groqRaw = await groqResp.text();
-              if (!groqResp.ok) {
-                throw new Error(`Groq HTTP ${groqResp.status}: ${groqRaw.slice(0, 140)}`);
-              }
+      try {
+        if (!parsed) {
+          const aiTargets = geminiKeys.length > 0 ? buildAttemptTargets(resolveAiThinkingTarget(effectiveGradePreset), 0) : [];
 
-              const groqJson = JSON.parse(groqRaw) as {
-                choices?: Array<{ message?: { content?: string } }>;
+          // Hedged race: primary fast engine starts immediately; backup starts at 2.4s (or instantly on primary error)
+          if (groqApiKey && aiTargets.length > 0) {
+            const primaryCtrl = new AbortController();
+            const backupCtrl = new AbortController();
+            const primaryTimer = setTimeout(() => primaryCtrl.abort(), 7_000);
+            const backupMaxTimer = setTimeout(() => backupCtrl.abort(), 14_000);
+            let hedgeTimer: ReturnType<typeof setTimeout> | null = null;
+            let primaryFinished = false;
+            let backupStarted = false;
+
+            const primaryTask = (async () => {
+              const resObj = await callGroqGrader('openai/gpt-oss-20b', primaryCtrl.signal);
+              primaryFinished = true;
+              backupCtrl.abort();
+              return resObj;
+            })();
+
+            const backupTask = new Promise<ParsedGrade>((resolve, reject) => {
+              const startBackup = () => {
+                if (backupStarted) return;
+                backupStarted = true;
+                if (primaryFinished || backupCtrl.signal.aborted) {
+                  reject(new Error('HEDGE_SKIPPED'));
+                  return;
+                }
+                if (wantsStream) {
+                  sendSse({ type: 'stage', message: 'Checking answers carefully...' });
+                }
+                callGeminiGrader(aiTargets[0], backupCtrl.signal)
+                  .then((resObj) => {
+                    primaryCtrl.abort();
+                    resolve(resObj);
+                  })
+                  .catch(reject);
               };
-              const content = groqJson?.choices?.[0]?.message?.content || '{}';
-              const candidate = extractJsonObject<ParsedGrade>(content);
-              if (candidate && Array.isArray(candidate.questionReports)) {
-                parsed = candidate;
-                gradedBy = 'groq';
-                break;
+
+              hedgeTimer = setTimeout(startBackup, isDeepPreset ? 3_500 : 2_800);
+              primaryTask.catch((err) => {
+                console.warn('[Step 2 Primary Hedge Trigger]', err instanceof Error ? err.message : err);
+                if (hedgeTimer) {
+                  clearTimeout(hedgeTimer);
+                  hedgeTimer = null;
+                }
+                startBackup();
+              });
+            });
+
+            try {
+              parsed = await Promise.any([primaryTask, backupTask]);
+            } catch (raceErr) {
+              lastErr = raceErr;
+            } finally {
+              clearTimeout(primaryTimer);
+              clearTimeout(backupMaxTimer);
+              if (hedgeTimer) clearTimeout(hedgeTimer);
+            }
+
+            // If hedged race failed, fall through to secondary fast pool (120b + remaining targets)
+            if (!parsed) {
+              try {
+                parsed = await callGroqGrader('openai/gpt-oss-120b', AbortSignal.timeout(9_000));
+              } catch (err) {
+                lastErr = err;
               }
-            } catch (groqErr) {
-              lastErr = groqErr;
-              groqFallbackReason =
-                groqErr instanceof Error ? groqErr.message.slice(0, 140) : String(groqErr).slice(0, 140);
-              console.warn(`Groq (${groqModel}) check failed, continuing fallback:`, groqFallbackReason);
-              if (groqFallbackReason.includes('HTTP 401') || groqFallbackReason.includes('HTTP 403')) {
-                break; // No point retrying 2nd Groq model with an unauthorized key
+            }
+            for (let idx = 1; idx < aiTargets.length && !parsed; idx++) {
+              try {
+                parsed = await callGeminiGrader(aiTargets[idx], AbortSignal.timeout(12_000));
+              } catch (err) {
+                lastErr = err;
+              }
+            }
+          } else if (groqApiKey) {
+            for (const gm of ['openai/gpt-oss-20b', 'openai/gpt-oss-120b']) {
+              if (parsed) break;
+              try {
+                parsed = await callGroqGrader(gm, AbortSignal.timeout(8_500));
+              } catch (err) {
+                lastErr = err;
+              }
+            }
+          } else {
+            for (const target of aiTargets) {
+              if (parsed) break;
+              try {
+                parsed = await callGeminiGrader(target, AbortSignal.timeout(12_000));
+              } catch (err) {
+                lastErr = err;
               }
             }
           }
         }
 
-        // 2) Automatic Fallback to Gemini Multi-Key text grading if primary engine is unset or failed
-        if (!parsed && getConfiguredGeminiKeys().length > 0) {
-          if (wantsStream && groqApiKey) {
-            sendSse({
-              type: 'stage',
-              message: 'Checking answers carefully...',
-            });
-          }
-          const aiPreset = normalizeThinkingPreset(body.thinkingLevel, serverAiConfig.studentLevel);
-          const effectiveGradePreset: AiThinkingPreset =
-            aiPreset === 'MINIMAL' || aiPreset === 'LOW' ? 'MINIMAL' : aiPreset;
-          const aiTarget = resolveAiThinkingTarget(effectiveGradePreset);
-          const aiTargets = buildAttemptTargets(aiTarget, 0);
-
-          for (const currentTarget of aiTargets) {
-            if (parsed) break;
-            const ai = createGenAIClient(currentTarget.apiKey);
-            const callTimeoutMs = currentTarget.model === 'gemini-4-hydrogen' ? 16_000 : 20_000;
-            for (let attempt = 0; attempt < 2; attempt++) {
-              try {
-                const response = await ai.models.generateContent({
-                  model: currentTarget.model,
-                  contents: promptText,
-                  config: {
-                    thinkingConfig: { thinkingLevel: currentTarget.thinkingLevel },
-                    abortSignal: AbortSignal.timeout(callTimeoutMs),
-                    responseMimeType: 'application/json',
-                    responseSchema: {
-                      type: Type.OBJECT,
-                      properties: {
-                        questionReports: {
-                          type: Type.ARRAY,
-                          items: {
-                            type: Type.OBJECT,
-                            properties: {
-                              qNo: { type: Type.INTEGER },
-                              studentAnswer: { type: Type.STRING },
-                              marksObtained: { type: Type.NUMBER },
-                              causeOfDeduction: { type: Type.STRING },
-                            },
-                            required: ['qNo', 'studentAnswer', 'marksObtained', 'causeOfDeduction'],
-                          },
-                        },
-                        overallAdvice: { type: Type.STRING },
-                      },
-                      required: ['questionReports', 'overallAdvice'],
-                    },
-                  },
-                });
-                const candidate = extractJsonObject<ParsedGrade>((response.text ?? '{}').trim());
-                if (candidate && Array.isArray(candidate.questionReports)) {
-                  parsed = candidate;
-                  gradedBy = 'gemini';
-                  break;
-                }
-              } catch (err) {
-                lastErr = err;
-                if (isDailyQuotaExhaustedError(err)) {
-                  markKeyModelBlocked(currentTarget.keyIndex, currentTarget.model);
-                  break;
-                }
-                if (
-                  isTimedOutError(err) ||
-                  isQuotaOrRateLimitError(err) ||
-                  !isRetryableGeminiError(err) ||
-                  attempt >= 1
-                ) {
-                  break;
-                }
-                await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
-              }
-            }
-          }
+        if (parsed && Array.isArray(parsed.questionReports)) {
+          setCachedGradeResult(gradeCacheKey, parsed);
         }
       } finally {
         if (heartbeat) clearInterval(heartbeat);

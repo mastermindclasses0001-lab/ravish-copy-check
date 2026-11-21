@@ -456,9 +456,9 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
   const captureCopyPageFrame = () => {
     if (!copyVideoRef.current || capturedPages.length >= 20) return;
     const compressed = captureVideoFrameAsDataUrl(copyVideoRef.current, {
-      maxDim: 1080,
-      quality: 0.65,
-      maxChars: 125_000,
+      maxDim: 960,
+      quality: 0.68,
+      maxChars: 95_000,
     });
     if (compressed) {
       setCapturedPages((prev) => [...prev.slice(0, 19), compressed]);
@@ -479,12 +479,13 @@ export const AdminStudentDesk: React.FC<AdminStudentDeskProps> = ({
     setPhotoProgressText(`Optimizing Photos (0/${selected.length})...`);
     setSubmitError('');
     setLastSubmitted(null);
+    void fetch('/api/health').catch(() => {});
     try {
       const valid = await compressImageFilesInBatches(
         selected,
-        { maxDim: 1080, quality: 0.65, maxChars: 125_000 },
+        { maxDim: 960, quality: 0.68, maxChars: 95_000 },
         (done, total) => setPhotoProgressText(`Optimizing Photos (${done}/${total})...`),
-        3
+        4
       );
       if (valid.length > 0) {
         setCapturedPages((prev) => [...prev, ...valid].slice(0, 20));

@@ -182,7 +182,7 @@ export async function compressImageFilesInBatches(
   files: File[],
   options: ImageCompressOptions = {},
   onProgress?: (completed: number, total: number) => void,
-  concurrency = 3
+  concurrency = 4
 ): Promise<string[]> {
   const total = files.length;
   if (total === 0) return [];
